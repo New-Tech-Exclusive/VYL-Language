@@ -1,3 +1,5 @@
+#Simple Python script, used to show the benchmark
+
 import time
 
 print("Starting benchmark: counting to 1,000,000,000...")

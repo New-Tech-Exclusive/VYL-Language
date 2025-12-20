@@ -1,0 +1,19 @@
+import stdio
+
+Main() {
+    Print("Starting benchmark: counting to 1,000,000,000..." /n);
+    
+    var dec start = Clock();
+    var int i = 0;
+    
+    while (i < 1000000000) {
+        i = i + 1;
+    }
+    
+    var dec end = Clock();
+    var dec elapsed = end - start;
+    
+    Print("Time taken (seconds): " /n);
+    Print(elapsed);
+    Print("Finished." /n);
+}

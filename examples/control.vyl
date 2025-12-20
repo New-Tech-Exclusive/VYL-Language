@@ -1,0 +1,23 @@
+Print("Testing Comparisons:");
+
+if (1 < 2) {
+    Print("1 < 2 is True");
+} else {
+    Print("1 < 2 is False");
+}
+
+if (5 == 5) {
+    Print("5 == 5 is True");
+}
+
+if (10 > 20) {
+    Print("10 > 20 is True");
+} else {
+    Print("10 > 20 is False");
+}
+
+Print("Testing Math:");
+Print(10 + 5 * 2); // Should be 20 due to precedence
+Print((10 - 2) * 3); 
+// Let's stick to basic precedence for now.
+Print(20 / 4 - 1); // Should be 4

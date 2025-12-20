@@ -1,0 +1,3 @@
+Function Square(n) {
+    return n * n
+}

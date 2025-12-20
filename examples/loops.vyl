@@ -1,0 +1,11 @@
+Main() {
+    var int sum = 0
+    for i in 1..5 {
+        sum = sum + i
+        Print(i)
+        Print(" ")
+    }
+    Print("\nSum: ")
+    Print(sum)
+    Print("\n")
+}

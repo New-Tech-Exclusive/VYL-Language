@@ -1,0 +1,8 @@
+import stdio
+
+// In theory, you can also do the Python method of just Print("Hello, World!")
+// but I'm not sure if that still works at the time of writing this comment, last time I checked though, it did.
+
+Main() {
+    Print("Hello, World!");
+}

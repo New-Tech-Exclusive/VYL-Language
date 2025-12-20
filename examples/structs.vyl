@@ -1,0 +1,11 @@
+struct Point {
+    var int x
+    var int y
+}
+
+Main() {
+    var Point p = new Point
+    p.x = 10
+    p.y = 20
+    Print(p.x + p.y)
+}

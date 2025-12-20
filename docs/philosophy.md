@@ -1,0 +1,5 @@
+# Philosophy
+
+VYL is a language designed to be simple, fast, and easy to use. It is meant to be a direct replacement for C, I know languages like Rust, Zig, and C++ exist, but I find them hard to use, read, and learn.
+This language is being designed to be a modern, safe, and fast language for systems programming and computationally intensive tasks. But here's the catch, I don't want it to be a language that's hard to use, read, or learn. I want it to have simple keywords, easy to understand syntax, and a fast compiler. The language should be able to be used for anything, from simple scripts to complex systems. It WILL be a language that is general purpose, and community driven. There will be ONE version of the language, no situation where I make VYL, then a random company makes N-VYL, then someone else makes M-VYL, etc. This will not turn into an ASM situation, where every company has their own version of the language, and theres no defined version of the language.
+VYL is, at heart, a fast, compiled python like language, with the added C-like syntax, and speed.

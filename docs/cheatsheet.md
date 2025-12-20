@@ -2,6 +2,10 @@
 
 A quick reference guide for the VYL programming language.
 
+## NOTICE
+
+Not *Fully* up to date, This WILL change
+
 ## Types
 
 | Type | Keyword | Description | Example |

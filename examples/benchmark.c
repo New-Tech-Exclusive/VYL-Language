@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <time.h>
-
+//This is the C script used in the benchmark
 int main() {
     printf("Starting benchmark: counting to 1,000,000,000...\n");
     

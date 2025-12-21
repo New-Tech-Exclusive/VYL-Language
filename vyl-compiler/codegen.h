@@ -26,6 +26,9 @@ typedef struct {
   int stack_pointer;
   StructInfo structs[32];
   int struct_count;
+  // Loop context for break/continue
+  const char *current_loop_start;
+  const char *current_loop_end;
 } CodeGen;
 
 void codegen_init(CodeGen *cg, FILE *out);

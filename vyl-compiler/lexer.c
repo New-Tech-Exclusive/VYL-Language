@@ -5,10 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char *keywords[] = {"Main", "Function", "import", "include", "if",
-                          "else", "while",    "return", "Print",   "var",
-                          "int",  "string",   "dec",    "bool",    "struct",
-                          "new",  "for",      "in",     "match",   NULL};
+const char *keywords[] = {"Main",     "Function", "import", "include", "if",
+                          "else",     "while",    "return", "Print",   "var",
+                          "int",      "string",   "dec",    "bool",    "struct",
+                          "new",      "for",      "in",     "match",   "break",
+                          "continue", NULL};
 
 int is_keyword(const char *str) {
   for (int i = 0; keywords[i] != NULL; i++) {
@@ -74,17 +75,64 @@ Token *lexer_tokenize(Lexer *lexer, int *count) {
     }
 
     if (c == '"') {
+      // Start of string literal
       advance(lexer);
-      int start = lexer->pos;
+      // Allocate a temporary buffer for the processed string
+      size_t buf_cap = 64;
+      size_t buf_len = 0;
+      char *buf = malloc(buf_cap);
+      if (!buf) {
+        fprintf(stderr, "Memory allocation failed in lexer\n");
+        exit(1);
+      }
       while (lexer->pos < lexer->length && peek(lexer) != '"') {
+        char ch = peek(lexer);
+        if (ch == '\\') {
+          // Escape sequence
+          advance(lexer);
+          if (lexer->pos >= lexer->length)
+            break;
+          char esc = peek(lexer);
+          char out;
+          switch (esc) {
+          case 'n':
+            out = '\n';
+            break;
+          case 't':
+            out = '\t';
+            break;
+          case '\\':
+            out = '\\';
+            break;
+          case '"':
+            out = '"';
+            break;
+          default:
+            out = esc;
+            break; // Unknown escape, keep as is
+          }
+          if (buf_len + 1 >= buf_cap) {
+            buf_cap *= 2;
+            buf = realloc(buf, buf_cap);
+          }
+          buf[buf_len++] = out;
+        } else {
+          if (buf_len + 1 >= buf_cap) {
+            buf_cap *= 2;
+            buf = realloc(buf, buf_cap);
+          }
+          buf[buf_len++] = ch;
+        }
         advance(lexer);
       }
-      int len = lexer->pos - start;
-      char *val = malloc(len + 1);
-      strncpy(val, lexer->source + start, len);
-      val[len] = '\0';
-      tokens[(*count)++] = create_token(TOKEN_STRING, val, lexer->line);
-      free(val);
+      // Null‑terminate the string
+      if (buf_len + 1 >= buf_cap) {
+        buf = realloc(buf, buf_len + 1);
+      }
+      buf[buf_len] = '\0';
+      tokens[(*count)++] = create_token(TOKEN_STRING, buf, lexer->line);
+      free(buf);
+      // Skip closing quote
       advance(lexer);
       continue;
     }
@@ -147,6 +195,10 @@ Token *lexer_tokenize(Lexer *lexer, int *count) {
           type = TOKEN_KEYWORD_IN;
         else if (strcmp(val, "match") == 0)
           type = TOKEN_KEYWORD_MATCH;
+        else if (strcmp(val, "break") == 0)
+          type = TOKEN_KEYWORD_BREAK;
+        else if (strcmp(val, "continue") == 0)
+          type = TOKEN_KEYWORD_CONTINUE;
         tokens[(*count)++] = create_token(type, val, lexer->line);
       } else {
         tokens[(*count)++] = create_token(TOKEN_ID, val, lexer->line);
@@ -157,6 +209,13 @@ Token *lexer_tokenize(Lexer *lexer, int *count) {
 
     switch (c) {
     case '.':
+      if (lexer->pos + 1 < lexer->length &&
+          lexer->source[lexer->pos + 1] == '.') {
+        tokens[(*count)++] = create_token(TOKEN_DOTDOT, "..", lexer->line);
+        advance(lexer);
+        advance(lexer);
+        continue;
+      }
       tokens[(*count)++] = create_token(TOKEN_DOT, ".", lexer->line);
       break;
     case '(':
@@ -235,6 +294,16 @@ Token *lexer_tokenize(Lexer *lexer, int *count) {
         // Division operator
         tokens[(*count)++] = create_token(TOKEN_SLASH, "/", lexer->line);
       }
+      break;
+    case '!':
+      if (lexer->pos + 1 < lexer->length &&
+          lexer->source[lexer->pos + 1] == '=') {
+        tokens[(*count)++] = create_token(TOKEN_NEQ, "!=", lexer->line);
+        advance(lexer);
+        advance(lexer);
+        continue;
+      }
+      tokens[(*count)++] = create_token(TOKEN_NOT, "!", lexer->line);
       break;
     default:
       fprintf(stderr, "Unexpected character type '%c' at line %d\n", c,

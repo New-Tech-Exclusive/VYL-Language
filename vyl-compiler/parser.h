@@ -26,7 +26,9 @@ typedef enum {
   NODE_MEMBER_ACCESS,
   NODE_NEW,
   NODE_FOR,
-  NODE_MATCH
+  NODE_MATCH,
+  NODE_BREAK,
+  NODE_CONTINUE
 } NodeType;
 
 typedef struct ASTNode {

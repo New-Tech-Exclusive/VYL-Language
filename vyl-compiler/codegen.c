@@ -15,6 +15,8 @@ void codegen_init(CodeGen *cg, FILE *out) {
   cg->local_count = 0;
   cg->stack_pointer = 0;
   cg->struct_count = 0;
+  cg->current_loop_start = NULL;
+  cg->current_loop_end = NULL;
 }
 
 // Simple String Table
@@ -280,11 +282,13 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
         fprintf(cg->out, "    sub rax, %d\n", val);
       else if (bin->op == TOKEN_STAR)
         fprintf(cg->out, "    imul rax, rax, %d\n", val);
-      else if (bin->op == TOKEN_EQ || bin->op == TOKEN_LT ||
-               bin->op == TOKEN_GT) {
+      else if (bin->op == TOKEN_EQ || bin->op == TOKEN_NEQ ||
+               bin->op == TOKEN_LT || bin->op == TOKEN_GT) {
         fprintf(cg->out, "    cmp rax, %d\n", val);
         if (bin->op == TOKEN_EQ)
           fprintf(cg->out, "    sete al\n");
+        else if (bin->op == TOKEN_NEQ)
+          fprintf(cg->out, "    setne al\n");
         else if (bin->op == TOKEN_LT)
           fprintf(cg->out, "    setl al\n");
         else if (bin->op == TOKEN_GT)
@@ -368,12 +372,57 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
       else
         fprintf(cg->out, "    add rsp, 8\n");
     }
+    // Handle builtin functions that return values
+    // Note: Arguments are already in registers from the push/pop above
     if (strcmp(call->callee, "Clock") == 0) {
       fprintf(cg->out, "    call clock@plt\n");
       // Convert to seconds: rax / 1000000.0
       fprintf(cg->out, "    cvtsi2sd xmm0, rax\n");
       int id = get_decimal_id(1000000.0);
       fprintf(cg->out, "    divsd xmm0, [rip + dec_const_%d]\n", id);
+    } else if (strcmp(call->callee, "Exists") == 0) {
+      // Arg already in rdi
+      fprintf(cg->out, "    xor esi, esi\n");
+      fprintf(cg->out, "    call access@plt\n");
+      fprintf(cg->out, "    test eax, eax\n");
+      fprintf(cg->out, "    sete al\n");
+      fprintf(cg->out, "    movzx rax, al\n");
+    } else if (strcmp(call->callee, "Len") == 0) {
+      // Arg already in rdi
+      fprintf(cg->out, "    call strlen@plt\n");
+    } else if (strcmp(call->callee, "Concat") == 0) {
+      // Args already in rdi (str1) and rsi (str2)
+      fprintf(cg->out, "    push rdi\n");                 // Save str1
+      fprintf(cg->out, "    push rsi\n");                 // Save str2
+      fprintf(cg->out, "    call strlen@plt\n");          // len(str1)
+      fprintf(cg->out, "    mov r14, rax\n");             // r14 = len1
+      fprintf(cg->out, "    pop rsi\n");                  // Restore str2
+      fprintf(cg->out, "    pop r15\n");                  // str1 in r15
+      fprintf(cg->out, "    push r15\n");                 // Save str1 again
+      fprintf(cg->out, "    mov rdi, rsi\n");             // str2 in rdi
+      fprintf(cg->out, "    mov r13, rsi\n");             // Save str2 in r13
+      fprintf(cg->out, "    call strlen@plt\n");          // len(str2)
+      fprintf(cg->out, "    lea rdi, [r14 + rax + 1]\n"); // len1 + len2 + 1
+      fprintf(cg->out, "    call malloc@plt\n");
+      fprintf(cg->out, "    mov rdi, rax\n"); // result in rdi
+      fprintf(cg->out, "    pop rsi\n");      // str1 in rsi
+      fprintf(cg->out, "    push rax\n");     // Save result
+      fprintf(cg->out, "    call strcpy@plt\n");
+      fprintf(cg->out, "    pop rax\n"); // result
+      fprintf(cg->out, "    mov rdi, rax\n");
+      fprintf(cg->out, "    mov rsi, r13\n"); // str2
+      fprintf(cg->out, "    call strcat@plt\n");
+    } else if (strcmp(call->callee, "Open") == 0) {
+      // Args already in rdi (filename) and rsi (mode)
+      fprintf(cg->out, "    call fopen@plt\n");
+    } else if (strcmp(call->callee, "System") == 0 ||
+               strcmp(call->callee, "Exec") == 0) {
+      // Arg already in rdi
+      fprintf(cg->out, "    call system@plt\n");
+    } else if (strcmp(call->callee, "CreateFolder") == 0) {
+      // Arg already in rdi
+      fprintf(cg->out, "    mov esi, 0755\n");
+      fprintf(cg->out, "    call mkdir@plt\n");
     } else {
       fprintf(cg->out, "    call %s\n", call->callee);
     }
@@ -497,9 +546,18 @@ void gen_if(CodeGen *cg, IfNode *node) {
 void gen_while(CodeGen *cg, WhileNode *node) {
   static int label_idx = 0;
   int cur_idx = label_idx++;
-  char body_label[32], test_label[32];
+  char body_label[32], test_label[32], end_label[32];
   sprintf(body_label, ".Lwhile_body%d", cur_idx);
   sprintf(test_label, ".Lwhile_test%d", cur_idx);
+  sprintf(end_label, ".Lwhile_end%d", cur_idx);
+
+  // Save previous loop context
+  const char *prev_start = cg->current_loop_start;
+  const char *prev_end = cg->current_loop_end;
+
+  // Set current loop context for break/continue
+  cg->current_loop_start = test_label;
+  cg->current_loop_end = end_label;
 
   fprintf(cg->out, "    jmp %s\n", test_label);
   fprintf(cg->out, "%s:\n", body_label);
@@ -510,8 +568,11 @@ void gen_while(CodeGen *cg, WhileNode *node) {
   }
   fprintf(cg->out, "%s:\n", test_label);
   gen_cond_jmp(cg, node->condition, body_label, true);
-  fprintf(cg->out, ".Lwhile_end%d:\n",
-          cur_idx); // Keep label for potential break in future
+  fprintf(cg->out, "%s:\n", end_label);
+
+  // Restore previous loop context
+  cg->current_loop_start = prev_start;
+  cg->current_loop_end = prev_end;
 }
 
 void gen_statement(CodeGen *cg, ASTNode *node) {
@@ -576,6 +637,161 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
     } else if (strcmp(call->callee, "Clock") == 0) {
       fprintf(cg->out, "    call clock@plt\n");
       // rax now has clock_t (long)
+    } else if (strcmp(call->callee, "Open") == 0) {
+      // Open(filename, mode) -> file handle (as int)
+      // Args: filename (string), mode (string)
+      ASTNode *filename = call->args;
+      ASTNode *mode = filename ? filename->next : NULL;
+      if (filename && mode) {
+        gen_expr(cg, mode); // mode in rax
+        fprintf(cg->out, "    push rax\n");
+        gen_expr(cg, filename);                 // filename in rax
+        fprintf(cg->out, "    pop rsi\n");      // mode in rsi
+        fprintf(cg->out, "    mov rdi, rax\n"); // filename in rdi
+        fprintf(cg->out, "    call fopen@plt\n");
+        // rax now has FILE* (or NULL)
+      }
+    } else if (strcmp(call->callee, "Close") == 0) {
+      // Close(file)
+      ASTNode *file = call->args;
+      if (file) {
+        gen_expr(cg, file);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call fclose@plt\n");
+      }
+    } else if (strcmp(call->callee, "Write") == 0) {
+      // Write(file, data) -> bytes written
+      ASTNode *file = call->args;
+      ASTNode *data = file ? file->next : NULL;
+      if (file && data) {
+        gen_expr(cg, data); // data in rax
+        fprintf(cg->out, "    push rax\n");
+        gen_expr(cg, file);                // file in rax
+        fprintf(cg->out, "    pop rdi\n"); // data (string) in rdi - 1st arg
+        fprintf(cg->out, "    mov rsi, rax\n"); // file (FILE*) in rsi - 2nd arg
+        fprintf(cg->out, "    call fputs@plt\n");
+        // rax has result
+      }
+    } else if (strcmp(call->callee, "System") == 0 ||
+               strcmp(call->callee, "Exec") == 0) {
+      // System(command) -> exit code
+      ASTNode *cmd = call->args;
+      if (cmd) {
+        gen_expr(cg, cmd);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call system@plt\n");
+        // rax has exit code
+      }
+    } else if (strcmp(call->callee, "Exit") == 0) {
+      // Exit(code)
+      ASTNode *code = call->args;
+      if (code) {
+        gen_expr(cg, code);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call exit@plt\n");
+      } else {
+        fprintf(cg->out, "    xor edi, edi\n");
+        fprintf(cg->out, "    call exit@plt\n");
+      }
+    } else if (strcmp(call->callee, "Exists") == 0) {
+      // Exists(path) -> bool (1 if exists, 0 if not)
+      // Uses access() syscall to check file/folder existence
+      ASTNode *path = call->args;
+      if (path) {
+        gen_expr(cg, path);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    xor esi, esi\n"); // F_OK = 0 (check existence)
+        fprintf(cg->out, "    call access@plt\n");
+        // access returns 0 on success, -1 on failure
+        // Convert to bool: 0 -> 1, -1 -> 0
+        fprintf(cg->out, "    test eax, eax\n");
+        fprintf(cg->out, "    sete al\n"); // Set AL to 1 if ZF=1 (eax==0)
+        fprintf(cg->out, "    movzx rax, al\n");
+      }
+    } else if (strcmp(call->callee, "CreateFolder") == 0) {
+      // CreateFolder(path) -> int (0 on success, -1 on error)
+      ASTNode *path = call->args;
+      if (path) {
+        gen_expr(cg, path);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    mov esi, 0755\n"); // Default permissions
+        fprintf(cg->out, "    call mkdir@plt\n");
+      }
+    } else if (strcmp(call->callee, "Len") == 0) {
+      // Len(string) -> int (length of string)
+      ASTNode *str = call->args;
+      if (str) {
+        gen_expr(cg, str);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call strlen@plt\n");
+      }
+    } else if (strcmp(call->callee, "Concat") == 0) {
+      // Concat(str1, str2) -> string (concatenated)
+      // Note: This allocates memory, caller should eventually free
+      ASTNode *str1 = call->args;
+      ASTNode *str2 = str1 ? str1->next : NULL;
+      if (str1 && str2) {
+        // Get lengths
+        gen_expr(cg, str1);
+        fprintf(cg->out, "    push rax\n"); // Save str1
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call strlen@plt\n");
+        fprintf(cg->out, "    push rax\n"); // Save len1
+
+        gen_expr(cg, str2);
+        fprintf(cg->out, "    push rax\n"); // Save str2
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call strlen@plt\n");
+        fprintf(cg->out, "    mov r12, rax\n"); // len2 in r12
+
+        // Allocate memory: len1 + len2 + 1
+        fprintf(cg->out, "    pop r13\n"); // str2 in r13
+        fprintf(cg->out, "    pop r14\n"); // len1 in r14
+        fprintf(cg->out, "    pop r15\n"); // str1 in r15
+        fprintf(cg->out, "    lea rdi, [r14 + r12 + 1]\n");
+        fprintf(cg->out, "    call malloc@plt\n");
+        fprintf(cg->out, "    push rax\n"); // Save result
+
+        // strcpy(result, str1)
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    mov rsi, r15\n");
+        fprintf(cg->out, "    call strcpy@plt\n");
+
+        // strcat(result, str2)
+        fprintf(cg->out, "    pop rax\n"); // result
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    mov rsi, r13\n");
+        fprintf(cg->out, "    call strcat@plt\n");
+      }
+    } else if (strcmp(call->callee, "Substring") == 0) {
+      // Substring(str, start, length) -> string
+      ASTNode *str = call->args;
+      ASTNode *start = str ? str->next : NULL;
+      ASTNode *length = start ? start->next : NULL;
+      if (str && start && length) {
+        gen_expr(cg, length);
+        fprintf(cg->out, "    push rax\n"); // Save length
+        gen_expr(cg, start);
+        fprintf(cg->out, "    push rax\n"); // Save start
+        gen_expr(cg, str);
+        fprintf(cg->out, "    pop r12\n"); // start in r12
+        fprintf(cg->out, "    pop r13\n"); // length in r13
+
+        // Allocate memory: length + 1
+        fprintf(cg->out, "    lea rdi, [r13 + 1]\n");
+        fprintf(cg->out, "    call malloc@plt\n");
+        fprintf(cg->out, "    push rax\n"); // Save result
+
+        // strncpy(result, str + start, length)
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    lea rsi, [rax + r12]\n"); // str + start
+        fprintf(cg->out, "    mov rdx, r13\n");         // length
+        fprintf(cg->out, "    call strncpy@plt\n");
+
+        // Null terminate
+        fprintf(cg->out, "    pop rax\n"); // result
+        fprintf(cg->out, "    mov byte ptr [rax + r13], 0\n");
+      }
     } else {
       gen_expr(cg, node);
     }
@@ -588,6 +804,58 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
     gen_if(cg, (IfNode *)node);
   } else if (node->type == NODE_WHILE) {
     gen_while(cg, (WhileNode *)node);
+  } else if (node->type == NODE_FOR) {
+    // For loop: for i in start..end { body }
+    ForNode *fnode = (ForNode *)node;
+    static int for_label_idx = 0;
+    int cur_idx = for_label_idx++;
+
+    // Generate labels
+    char start_label[32], test_label[32], end_label[32];
+    sprintf(start_label, ".Lfor_start%d", cur_idx);
+    sprintf(test_label, ".Lfor_test%d", cur_idx);
+    sprintf(end_label, ".Lfor_end%d", cur_idx);
+
+    // Initialize iterator variable
+    gen_expr(cg, fnode->start);
+    cg->stack_pointer += 8;
+    int iter_offset = cg->stack_pointer;
+    cg->locals[cg->local_count].name = strdup(fnode->iterator_name);
+    cg->locals[cg->local_count].offset = iter_offset;
+    cg->locals[cg->local_count].type = VYL_TYPE_INT;
+    cg->locals[cg->local_count].reg = NULL;
+    cg->locals[cg->local_count].custom_type_name = NULL;
+    cg->local_count++;
+    fprintf(cg->out, "    sub rsp, 8\n");
+    fprintf(cg->out, "    mov [rbp - %d], rax\n", iter_offset);
+
+    // Jump to test first (condition-at-tail optimization)
+    fprintf(cg->out, "    jmp %s\n", test_label);
+
+    // Loop body
+    fprintf(cg->out, "%s:\n", start_label);
+    ASTNode *cur = fnode->body;
+    while (cur) {
+      gen_statement(cg, cur);
+      cur = cur->next;
+    }
+
+    // Increment iterator
+    fprintf(cg->out, "    mov rax, [rbp - %d]\n", iter_offset);
+    fprintf(cg->out, "    add rax, 1\n");
+    fprintf(cg->out, "    mov [rbp - %d], rax\n", iter_offset);
+
+    // Test condition: iterator <= end
+    fprintf(cg->out, "%s:\n", test_label);
+    fprintf(cg->out, "    mov rax, [rbp - %d]\n", iter_offset);
+    fprintf(cg->out, "    push rax\n");
+    gen_expr(cg, fnode->end);
+    fprintf(cg->out, "    pop r11\n");
+    fprintf(cg->out, "    cmp r11, rax\n");
+    fprintf(cg->out, "    jle %s\n", start_label);
+
+    // End label
+    fprintf(cg->out, "%s:\n", end_label);
   } else if (node->type == NODE_VAR_DECL) {
     gen_var_decl(cg, (VarDeclNode *)node);
   } else if (node->type == NODE_STRUCT_DEF) {
@@ -696,6 +964,18 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
           }
         }
       }
+    }
+  } else if (node->type == NODE_BREAK) {
+    if (cg->current_loop_end) {
+      fprintf(cg->out, "    jmp %s\n", cg->current_loop_end);
+    } else {
+      fprintf(stderr, "Error: break statement outside of loop\n");
+    }
+  } else if (node->type == NODE_CONTINUE) {
+    if (cg->current_loop_start) {
+      fprintf(cg->out, "    jmp %s\n", cg->current_loop_start);
+    } else {
+      fprintf(stderr, "Error: continue statement outside of loop\n");
     }
   }
 }

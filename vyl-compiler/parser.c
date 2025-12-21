@@ -453,7 +453,8 @@ ASTNode *parse_comparison(Parser *parser) {
   ASTNode *left = parse_sum(parser);
   while (1) {
     Token t = peek_token(parser);
-    if (t.type == TOKEN_EQ || t.type == TOKEN_LT || t.type == TOKEN_GT) {
+    if (t.type == TOKEN_EQ || t.type == TOKEN_NEQ || t.type == TOKEN_LT ||
+        t.type == TOKEN_GT) {
       consume_token(parser, t.type, NULL);
       ASTNode *right = parse_sum(parser);
 
@@ -675,6 +676,26 @@ ASTNode *parse_statement(Parser *parser) {
   }
   if (t.type == TOKEN_KEYWORD_MATCH) {
     return parse_match(parser);
+  }
+  if (t.type == TOKEN_KEYWORD_BREAK) {
+    consume_token(parser, TOKEN_KEYWORD_BREAK, NULL);
+    if (peek_token(parser).type == TOKEN_SEMICOLON) {
+      consume_token(parser, TOKEN_SEMICOLON, NULL);
+    }
+    ASTNode *node = malloc(sizeof(ASTNode));
+    node->type = NODE_BREAK;
+    node->next = NULL;
+    return node;
+  }
+  if (t.type == TOKEN_KEYWORD_CONTINUE) {
+    consume_token(parser, TOKEN_KEYWORD_CONTINUE, NULL);
+    if (peek_token(parser).type == TOKEN_SEMICOLON) {
+      consume_token(parser, TOKEN_SEMICOLON, NULL);
+    }
+    ASTNode *node = malloc(sizeof(ASTNode));
+    node->type = NODE_CONTINUE;
+    node->next = NULL;
+    return node;
   }
   if (t.type == TOKEN_KEYWORD) {
     if (strcmp(t.value, "return") == 0)

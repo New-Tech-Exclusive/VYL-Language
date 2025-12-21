@@ -1,0 +1,14 @@
+Main() {
+    Print("Opening file")
+    var file = Open("test.txt", "w")
+    
+    if (file != 0) {
+        Print("File opened, attempting write")
+        Write(file, "Test data")
+        Print("Write completed")
+        Close(file)
+        Print("File closed")
+    } else {
+        Print("Failed to open file")
+    }
+}

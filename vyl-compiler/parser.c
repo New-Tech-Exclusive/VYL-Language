@@ -380,7 +380,7 @@ ASTNode *parse_factor(Parser *parser) {
   ASTNode *left = parse_primary(parser);
   while (1) {
     Token t = peek_token(parser);
-    if (t.type == TOKEN_STAR || t.type == TOKEN_SLASH) {
+    if (t.type == TOKEN_STAR || t.type == TOKEN_SLASH || t.type == TOKEN_MOD) {
       consume_token(parser, t.type, NULL);
       ASTNode *right = parse_primary(parser);
 
@@ -457,7 +457,7 @@ ASTNode *parse_comparison(Parser *parser) {
   while (1) {
     Token t = peek_token(parser);
     if (t.type == TOKEN_EQ || t.type == TOKEN_NEQ || t.type == TOKEN_LT ||
-        t.type == TOKEN_GT) {
+        t.type == TOKEN_GT || t.type == TOKEN_LE || t.type == TOKEN_GE) {
       consume_token(parser, t.type, NULL);
       ASTNode *right = parse_sum(parser);
 
@@ -490,7 +490,27 @@ ASTNode *parse_comparison(Parser *parser) {
   return left;
 }
 
-ASTNode *parse_expression(Parser *parser) { return parse_comparison(parser); }
+ASTNode *parse_logic(Parser *parser) {
+  ASTNode *left = parse_comparison(parser);
+  while (1) {
+    Token t = peek_token(parser);
+    if (t.type == TOKEN_AND || t.type == TOKEN_OR) {
+      consume_token(parser, t.type, NULL);
+      ASTNode *right = parse_comparison(parser);
+      BinaryNode *node = malloc(sizeof(BinaryNode));
+      node->base.type = NODE_BINARY_OP;
+      node->base.next = NULL;
+      node->op = t.type;
+      node->left = left;
+      node->right = right;
+      left = (ASTNode *)node;
+    } else
+      break;
+  }
+  return left;
+}
+
+ASTNode *parse_expression(Parser *parser) { return parse_logic(parser); }
 
 ASTNode *parse_if(Parser *parser) {
   consume_token(parser, TOKEN_KEYWORD, "if");

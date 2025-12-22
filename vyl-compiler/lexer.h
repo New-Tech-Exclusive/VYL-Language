@@ -17,9 +17,14 @@ typedef enum {
   TOKEN_MINUS,
   TOKEN_STAR,
   TOKEN_SLASH,
+  TOKEN_MOD,    // %
   TOKEN_EQ,      // ==
   TOKEN_LT,      // <
+  TOKEN_LE,      // <=
   TOKEN_GT,      // >
+  TOKEN_GE,      // >=
+  TOKEN_AND,    // &&
+  TOKEN_OR,     // ||
   TOKEN_ASSIGN,  // =
   TOKEN_DECIMAL, // 3.14
   TOKEN_KEYWORD_VAR,

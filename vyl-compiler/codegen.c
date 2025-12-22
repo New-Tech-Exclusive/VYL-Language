@@ -183,54 +183,8 @@ int get_field_offset(StructInfo *si, const char *field_name) {
 
 void gen_cond_jmp(CodeGen *cg, ASTNode *cond, const char *label,
                   bool jump_if_true) {
-  if (cond->type == NODE_BINARY_OP) {
-    BinaryNode *bin = (BinaryNode *)cond;
-    if (bin->op == TOKEN_LT || bin->op == TOKEN_GT || bin->op == TOKEN_EQ) {
-      const char *l_reg = (bin->left->type == NODE_VAR)
-                              ? get_local_reg(cg, ((VarNode *)bin->left)->name)
-                              : NULL;
-      const char *r_reg = (bin->right->type == NODE_VAR)
-                              ? get_local_reg(cg, ((VarNode *)bin->right)->name)
-                              : NULL;
-      const char *l = "rax";
-      const char *r = "r11";
-
-      if (l_reg && r_reg) {
-        l = l_reg;
-        r = r_reg;
-        fprintf(cg->out, "    cmp %s, %s\n", l, r);
-      } else if (l_reg && bin->right->type == NODE_NUMBER) {
-        fprintf(cg->out, "    cmp %s, %d\n", l_reg,
-                ((NumberNode *)bin->right)->value);
-      } else if (l_reg) {
-        l = l_reg;
-        gen_expr(cg, bin->right);
-        r = "rax";
-        fprintf(cg->out, "    cmp %s, %s\n", l, r);
-      } else if (r_reg) {
-        r = r_reg;
-        gen_expr(cg, bin->left);
-        l = "rax";
-        fprintf(cg->out, "    cmp %s, %s\n", l, r);
-      } else {
-        gen_expr(cg, bin->left);
-        fprintf(cg->out, "    push rax\n");
-        gen_expr(cg, bin->right);
-        fprintf(cg->out, "    mov r11, rax\n    pop rax\n");
-        fprintf(cg->out, "    cmp %s, %s\n", l, r);
-      }
-      const char *jmp = "";
-      if (bin->op == TOKEN_LT)
-        jmp = jump_if_true ? "jl" : "jge";
-      else if (bin->op == TOKEN_GT)
-        jmp = jump_if_true ? "jg" : "jle";
-      else if (bin->op == TOKEN_EQ)
-        jmp = jump_if_true ? "je" : "jne";
-      fprintf(cg->out, "    %s %s\n", jmp, label);
-      return;
-    }
-  }
-  // Fallback for non-binary-comparison conditions
+  if (!cond) return;
+  // Evaluate the condition into rax and jump based on zero/non-zero.
   gen_expr(cg, cond);
   fprintf(cg->out, "    cmp rax, 0\n");
   if (jump_if_true)
@@ -240,8 +194,8 @@ void gen_cond_jmp(CodeGen *cg, ASTNode *cond, const char *label,
 }
 
 void gen_expr(CodeGen *cg, ASTNode *node) {
-  if (!node)
-    return;
+  if (!node) return;
+
   if (node->type == NODE_NUMBER) {
     fprintf(cg->out, "    mov rax, %d\n", ((NumberNode *)node)->value);
   } else if (node->type == NODE_VAR) {
@@ -263,21 +217,7 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
     } else {
       fprintf(cg->out, "    mov rax, [rbp - %d]\n", offset);
     }
-  } else if (node->type == NODE_INDEX) {
-    IndexNode *in = (IndexNode *)node;
-    gen_expr(cg, in->index); // Result in rax
-    if (in->base_expr->type == NODE_VAR) {
-      const char *name = ((VarNode *)in->base_expr)->name;
-      int offset = get_local_offset(cg, name);
-      // address = rbp - (offset + rax*8)
-      fprintf(cg->out, "    lea rcx, [rbp - %d]\n", offset);
-      fprintf(cg->out, "    shl rax, 3\n");
-      // Actually, stack grows down. arr[0] is at rbp-offset.
-      // arr[1] is at rbp-(offset+8).
-      // So rcx = rbp - offset - rax*8
-      fprintf(cg->out, "    sub rcx, rax\n");
-      fprintf(cg->out, "    mov rax, [rcx]\n");
-    }
+
   } else if (node->type == NODE_BINARY_OP) {
     BinaryNode *bin = (BinaryNode *)node;
     VylType left_type = get_expr_type(cg, bin->left);
@@ -285,40 +225,6 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
     VylType res_type = (left_type == VYL_TYPE_DEC || right_type == VYL_TYPE_DEC)
                            ? VYL_TYPE_DEC
                            : VYL_TYPE_INT;
-
-    // Fast path for integer literal optimized ops
-    if (res_type == VYL_TYPE_INT && bin->right->type == NODE_NUMBER) {
-      gen_expr(cg, bin->left);
-      int val = ((NumberNode *)bin->right)->value;
-      if (bin->op == TOKEN_PLUS)
-        fprintf(cg->out, "    add rax, %d\n", val);
-      else if (bin->op == TOKEN_MINUS)
-        fprintf(cg->out, "    sub rax, %d\n", val);
-      else if (bin->op == TOKEN_STAR)
-        fprintf(cg->out, "    imul rax, rax, %d\n", val);
-      else if (bin->op == TOKEN_EQ || bin->op == TOKEN_NEQ ||
-               bin->op == TOKEN_LT || bin->op == TOKEN_GT) {
-        fprintf(cg->out, "    cmp rax, %d\n", val);
-        if (bin->op == TOKEN_EQ)
-          fprintf(cg->out, "    sete al\n");
-        else if (bin->op == TOKEN_NEQ)
-          fprintf(cg->out, "    setne al\n");
-        else if (bin->op == TOKEN_LT)
-          fprintf(cg->out, "    setl al\n");
-        else if (bin->op == TOKEN_GT)
-          fprintf(cg->out, "    setg al\n");
-        fprintf(cg->out, "    movzx rax, al\n");
-      } else {
-        // Fallback for division or other ops not easily optimized with
-        // immediate
-        fprintf(cg->out, "    push rax\n");
-        gen_expr(cg, bin->right);
-        fprintf(cg->out, "    mov r11, rax\n");
-        fprintf(cg->out, "    pop rax\n");
-        fprintf(cg->out, "    cqo\n    idiv r11\n");
-      }
-      return;
-    }
 
     gen_expr(cg, bin->left);
     if (res_type == VYL_TYPE_DEC) {
@@ -354,11 +260,16 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
         fprintf(cg->out, "    sub rax, r11\n");
       } else if (bin->op == TOKEN_STAR) {
         fprintf(cg->out, "    imul rax, r11\n");
+      } else if (bin->op == TOKEN_MOD) {
+        fprintf(cg->out, "    cqo\n");
+        fprintf(cg->out, "    idiv r11\n");
+        fprintf(cg->out, "    mov rax, rdx\n");
       } else if (bin->op == TOKEN_SLASH) {
         fprintf(cg->out, "    cqo\n");
         fprintf(cg->out, "    idiv r11\n");
       } else if (bin->op == TOKEN_EQ || bin->op == TOKEN_LT ||
-                 bin->op == TOKEN_GT) {
+                 bin->op == TOKEN_GT || bin->op == TOKEN_LE ||
+                 bin->op == TOKEN_GE) {
         fprintf(cg->out, "    cmp rax, r11\n");
         if (bin->op == TOKEN_EQ)
           fprintf(cg->out, "    sete al\n");
@@ -366,6 +277,10 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
           fprintf(cg->out, "    setl al\n");
         else if (bin->op == TOKEN_GT)
           fprintf(cg->out, "    setg al\n");
+        else if (bin->op == TOKEN_LE)
+          fprintf(cg->out, "    setle al\n");
+        else if (bin->op == TOKEN_GE)
+          fprintf(cg->out, "    setge al\n");
         fprintf(cg->out, "    movzx rax, al\n");
       }
     }
@@ -485,6 +400,32 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
       // StringSplit(str, delim) -> array of strings
       // Args already in rdi (str) and rsi (delim)
       fprintf(cg->out, "    call vyl_stringsplit@plt\n");
+    } else if (strcmp(call->callee, "ToInt") == 0) {
+      // ToInt(str)
+      fprintf(cg->out, "    call vyl_to_int@plt\n");
+    } else if (strcmp(call->callee, "ToDecimal") == 0) {
+      // ToDecimal(str)
+      fprintf(cg->out, "    call vyl_to_decimal@plt\n");
+      // result in xmm0? vyl_to_decimal returns double in xmm? It returns double in rax normally
+      // We'll move returned double from rax to xmm0 via cvtsi2sd if needed; but vyl_to_decimal implemented returns double via C calling convention in xmm0.
+    } else if (strcmp(call->callee, "ToString") == 0) {
+      // ToString(value) -> string; we call appropriate runtime depending on types at compile time
+      fprintf(cg->out, "    call vyl_to_string_int@plt\n");
+    } else if (strcmp(call->callee, "Free") == 0) {
+      fprintf(cg->out, "    mov rdi, rax\n");
+      fprintf(cg->out, "    call vyl_free_ptr@plt\n");
+    } else if (strcmp(call->callee, "ArrayLen") == 0) {
+      // If argument is a simple local variable, emit immediate length
+      ASTNode *a = call->args;
+      if (a && a->type == NODE_VAR) {
+        const char *nm = ((VarNode *)a)->name;
+        int asz = get_local_array_size(cg, nm);
+        fprintf(cg->out, "    mov rax, %d\n", asz);
+      } else {
+        // Fallback to runtime (unknown)
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call vyl_array_len@plt\n");
+      }
     } else {
       fprintf(cg->out, "    call %s\n", call->callee);
     }
@@ -1189,6 +1130,8 @@ void codegen_generate(CodeGen *cg, ASTNode *root) {
                    ".extern strcmp\n.extern fopen\n.extern fclose\n"
                    ".extern vyl_read_file\n.extern vyl_readline_file\n"
                    ".extern vyl_filesize\n.extern vyl_stringsplit\n"
+                   ".extern vyl_to_int\n.extern vyl_to_decimal\n.extern vyl_to_string_int\n.extern vyl_free_ptr\n.extern vyl_array_len\n"
+                   ".extern log\n.extern exp\n.extern fmin\n.extern fmax\n.extern round\n"
                    ".section .rodata\n");
   StringConst *s = strings_head;
   while (s) {

@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <errno.h>
 
 // Read entire file contents into a string
 char* vyl_read_file(FILE *f) {
@@ -117,4 +120,49 @@ void vyl_panic(const char *msg) {
   else
     fprintf(stderr, "Runtime Error\n");
   exit(1);
+}
+
+int vyl_to_int(const char *s) {
+  if (!s) return 0;
+  char *end;
+  errno = 0;
+  long v = strtol(s, &end, 10);
+  if (errno != 0) return 0;
+  return (int)v;
+}
+
+double vyl_to_decimal(const char *s) {
+  if (!s) return 0.0;
+  char *end;
+  errno = 0;
+  double v = strtod(s, &end);
+  if (errno != 0) return 0.0;
+  return v;
+}
+
+char *vyl_to_string_int(long v) {
+  char buf[64];
+  int n = snprintf(buf, sizeof(buf), "%ld", v);
+  char *r = malloc(n + 1);
+  if (!r) return NULL;
+  memcpy(r, buf, n + 1);
+  return r;
+}
+
+char *vyl_to_string_dec(double v) {
+  char buf[128];
+  int n = snprintf(buf, sizeof(buf), "%.6g", v);
+  char *r = malloc(n + 1);
+  if (!r) return NULL;
+  memcpy(r, buf, n + 1);
+  return r;
+}
+
+void vyl_free_ptr(void *p) {
+  if (p) free(p);
+}
+
+long vyl_array_len(void *arr) {
+  // Unknown for generic pointers; compiler can optimize ArrayLen at compile time
+  return -1;
 }

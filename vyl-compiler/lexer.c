@@ -252,10 +252,20 @@ Token *lexer_tokenize(Lexer *lexer, int *count) {
       tokens[(*count)++] = create_token(TOKEN_STAR, "*", lexer->line);
       break;
     case '<':
-      tokens[(*count)++] = create_token(TOKEN_LT, "<", lexer->line);
+      if (lexer->pos + 1 < lexer->length && lexer->source[lexer->pos + 1] == '=') {
+        tokens[(*count)++] = create_token(TOKEN_LE, "<=", lexer->line);
+        advance(lexer);
+      } else {
+        tokens[(*count)++] = create_token(TOKEN_LT, "<", lexer->line);
+      }
       break;
     case '>':
-      tokens[(*count)++] = create_token(TOKEN_GT, ">", lexer->line);
+      if (lexer->pos + 1 < lexer->length && lexer->source[lexer->pos + 1] == '=') {
+        tokens[(*count)++] = create_token(TOKEN_GE, ">=", lexer->line);
+        advance(lexer);
+      } else {
+        tokens[(*count)++] = create_token(TOKEN_GT, ">", lexer->line);
+      }
       break;
     case '=':
       if (lexer->pos + 1 < lexer->length &&
@@ -293,6 +303,27 @@ Token *lexer_tokenize(Lexer *lexer, int *count) {
       } else {
         // Division operator
         tokens[(*count)++] = create_token(TOKEN_SLASH, "/", lexer->line);
+      }
+      break;
+    case '%':
+      tokens[(*count)++] = create_token(TOKEN_MOD, "%", lexer->line);
+      break;
+    case '&':
+      if (lexer->pos + 1 < lexer->length && lexer->source[lexer->pos + 1] == '&') {
+        tokens[(*count)++] = create_token(TOKEN_AND, "&&", lexer->line);
+        advance(lexer);
+      } else {
+        fprintf(stderr, "Unexpected '&' at line %d\n", lexer->line);
+        exit(1);
+      }
+      break;
+    case '|':
+      if (lexer->pos + 1 < lexer->length && lexer->source[lexer->pos + 1] == '|') {
+        tokens[(*count)++] = create_token(TOKEN_OR, "||", lexer->line);
+        advance(lexer);
+      } else {
+        fprintf(stderr, "Unexpected '|' at line %d\n", lexer->line);
+        exit(1);
       }
       break;
     case '!':
@@ -362,6 +393,16 @@ const char *token_type_to_string(TokenType type) {
     return "STAR";
   case TOKEN_SLASH:
     return "SLASH";
+  case TOKEN_MOD:
+    return "MOD";
+  case TOKEN_LE:
+    return "LE";
+  case TOKEN_GE:
+    return "GE";
+  case TOKEN_AND:
+    return "AND";
+  case TOKEN_OR:
+    return "OR";
   case TOKEN_EQ:
     return "EQ";
   case TOKEN_LT:

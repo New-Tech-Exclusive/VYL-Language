@@ -5,5 +5,5 @@ Main() {
         Print(i);
         Print(" ");
     }
-    Print("Sum:" sum);
+    Print("Sum: " sum);
 }

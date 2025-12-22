@@ -1,9 +1,9 @@
 Main() {
-    var sum = 0
+    var sum = 0;
     for i in 1..5 {
-        sum = sum + i
-        Print(i)
-        Print(" ")
+        sum = sum + i;
+        Print(i);
+        Print(" ");
     }
-    Print("Sum: " sum)
+    Print("Sum:" sum);
 }

@@ -8,6 +8,7 @@ typedef struct {
   char *name;
   int offset;
   VylType type;
+  int array_size; // 0 for scalars, >0 for arrays
   const char *reg; // Assigned register, or NULL if on stack
   char *custom_type_name;
 } LocalVar;

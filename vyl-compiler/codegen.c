@@ -1,13 +1,25 @@
 #define _POSIX_C_SOURCE 200809L
 #include "codegen.h"
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 // Forward declarations
 void gen_statement(CodeGen *cg, ASTNode *node);
 void gen_expr(CodeGen *cg, ASTNode *node);
 void gen_if(CodeGen *cg, IfNode *node);
+
+// Error reporting
+static void codegen_error(const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  fprintf(stderr, "CodeGen Error: ");
+  vfprintf(stderr, format, args);
+  fprintf(stderr, "\n");
+  va_end(args);
+}
 
 void codegen_init(CodeGen *cg, FILE *out) {
   cg->out = out;
@@ -109,15 +121,16 @@ VylType get_expr_type(CodeGen *cg, ASTNode *node) {
     if (strcmp(call->callee, "Clock") == 0)
       return VYL_TYPE_DEC;
   }
-  if (node->type == NODE_BINARY_OP) {
-    // Simple heuristic: if either side is dec, result is dec
-    BinaryNode *bin = (BinaryNode *)node;
-    if (get_expr_type(cg, bin->left) == VYL_TYPE_DEC ||
-        get_expr_type(cg, bin->right) == VYL_TYPE_DEC)
-      return VYL_TYPE_DEC;
-    return VYL_TYPE_INT;
-  }
+
   return VYL_TYPE_INT;
+}
+
+int get_local_array_size(CodeGen *cg, const char *name) {
+  for (int i = 0; i < cg->local_count; i++) {
+    if (strcmp(cg->locals[i].name, name) == 0)
+      return cg->locals[i].array_size;
+  }
+  return 1;
 }
 
 const char *get_local_custom_type_name(CodeGen *cg, const char *name) {
@@ -238,6 +251,7 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
     int offset = get_local_offset(cg, var->name);
 
     if (offset == 0 && reg == NULL) {
+      codegen_error("Undefined variable '%s'", var->name);
       fprintf(cg->out, "    # Error: Undefined variable %s\n", var->name);
       return;
     }
@@ -418,11 +432,59 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
     } else if (strcmp(call->callee, "System") == 0 ||
                strcmp(call->callee, "Exec") == 0) {
       // Arg already in rdi
+      fprintf(cg->out, "    sub rsp, 8\n");         // Stack alignment
       fprintf(cg->out, "    call system@plt\n");
+      fprintf(cg->out, "    add rsp, 8\n");         // Clean up
     } else if (strcmp(call->callee, "CreateFolder") == 0) {
       // Arg already in rdi
       fprintf(cg->out, "    mov esi, 0755\n");
       fprintf(cg->out, "    call mkdir@plt\n");
+    } else if (strcmp(call->callee, "Read") == 0) {
+      // Read(file) -> string (reads entire file)
+      // Arg already in rdi (FILE* handle)
+      // We need to read the file content
+      fprintf(cg->out, "    call vyl_read_file@plt\n");
+    } else if (strcmp(call->callee, "ReadLine") == 0) {
+      // ReadLine(file) -> string (reads one line)
+      // Arg already in rdi (FILE* handle)
+      fprintf(cg->out, "    call vyl_readline_file@plt\n");
+    } else if (strcmp(call->callee, "ReadSize") == 0) {
+      // ReadSize(file) -> int (file size in bytes)
+      // Arg already in rdi (FILE* handle)
+      fprintf(cg->out, "    call vyl_filesize@plt\n");
+    } else if (strcmp(call->callee, "Sqrt") == 0) {
+      // Sqrt(num) -> dec
+      fprintf(cg->out, "    call sqrt@plt\n");
+    } else if (strcmp(call->callee, "Sin") == 0) {
+      // Sin(rad) -> dec
+      fprintf(cg->out, "    call sin@plt\n");
+    } else if (strcmp(call->callee, "Cos") == 0) {
+      // Cos(rad) -> dec
+      fprintf(cg->out, "    call cos@plt\n");
+    } else if (strcmp(call->callee, "Tan") == 0) {
+      // Tan(rad) -> dec
+      fprintf(cg->out, "    call tan@plt\n");
+    } else if (strcmp(call->callee, "Abs") == 0) {
+      // Abs(num) -> num (same type)
+      fprintf(cg->out, "    call fabs@plt\n");
+    } else if (strcmp(call->callee, "Floor") == 0) {
+      // Floor(dec) -> int
+      fprintf(cg->out, "    call floor@plt\n");
+    } else if (strcmp(call->callee, "Ceil") == 0) {
+      // Ceil(dec) -> int
+      fprintf(cg->out, "    call ceil@plt\n");
+    } else if (strcmp(call->callee, "Power") == 0) {
+      // Power(base, exp) -> dec
+      // Args already in xmm0 (base) and xmm1 (exp)
+      fprintf(cg->out, "    call pow@plt\n");
+    } else if (strcmp(call->callee, "StringCompare") == 0) {
+      // StringCompare(str1, str2) -> int (0 if equal, <0 if str1<str2, >0 if str1>str2)
+      // Args already in rdi (str1) and rsi (str2)
+      fprintf(cg->out, "    call strcmp@plt\n");
+    } else if (strcmp(call->callee, "StringSplit") == 0) {
+      // StringSplit(str, delim) -> array of strings
+      // Args already in rdi (str) and rsi (delim)
+      fprintf(cg->out, "    call vyl_stringsplit@plt\n");
     } else {
       fprintf(cg->out, "    call %s\n", call->callee);
     }
@@ -440,6 +502,7 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
     NewNode *nn = (NewNode *)node;
     StructInfo *si = get_struct_info(cg, nn->type_name);
     if (!si) {
+      codegen_error("Undefined struct '%s'", nn->type_name);
       fprintf(cg->out, "    # Error: Undefined struct %s\n", nn->type_name);
       return;
     }
@@ -450,12 +513,14 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
     gen_expr(cg, ma->struct_expr); // Base in rax
     const char *struct_name = get_expr_custom_type_name(cg, ma->struct_expr);
     if (!struct_name) {
+      codegen_error("Could not resolve struct type for member access");
       fprintf(cg->out,
               "    # Error: Could not resolve struct type for member access\n");
       return;
     }
     StructInfo *si = get_struct_info(cg, struct_name);
     if (!si) {
+      codegen_error("Undefined struct '%s'", struct_name);
       fprintf(cg->out, "    # Error: Undefined struct %s\n", struct_name);
       return;
     }
@@ -479,6 +544,7 @@ void gen_var_decl(CodeGen *cg, VarDeclNode *node) {
   int offset = cg->stack_pointer - (8 * (size - 1));
   cg->locals[cg->local_count].name = strdup(node->name);
   cg->locals[cg->local_count].offset = offset;
+  cg->locals[cg->local_count].array_size = size;
   cg->locals[cg->local_count].type = node->type;
   cg->locals[cg->local_count].custom_type_name =
       node->custom_type_name ? strdup(node->custom_type_name) : NULL;
@@ -616,10 +682,12 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
             fprintf(cg->out, "    xor eax, eax\n");
             fprintf(cg->out, "    call printf@plt\n");
           } else if (type == VYL_TYPE_DEC) {
-            int fmt_id = get_string_id("%f ");
+            int fmt_id = get_string_id("%.6g ");
+            fprintf(cg->out, "    sub rsp, 8\n");  // Maintain 16-byte stack alignment
             fprintf(cg->out, "    lea rdi, [rip + str_%d]\n", fmt_id);
-            fprintf(cg->out, "    mov eax, 1\n");
+            fprintf(cg->out, "    mov eax, 1\n");  // 1 XMM register in use
             fprintf(cg->out, "    call printf@plt\n");
+            fprintf(cg->out, "    add rsp, 8\n");  // Clean up
           } else { // INT
             int fmt_id = get_string_id("%d ");
             fprintf(cg->out, "    mov rsi, rax\n");
@@ -659,6 +727,30 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
         fprintf(cg->out, "    mov rdi, rax\n");
         fprintf(cg->out, "    call fclose@plt\n");
       }
+    } else if (strcmp(call->callee, "Read") == 0) {
+      // Read(file) -> string (reads entire file)
+      ASTNode *file = call->args;
+      if (file) {
+        gen_expr(cg, file);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call vyl_read_file@plt\n");
+      }
+    } else if (strcmp(call->callee, "ReadLine") == 0) {
+      // ReadLine(file) -> string
+      ASTNode *file = call->args;
+      if (file) {
+        gen_expr(cg, file);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call vyl_readline_file@plt\n");
+      }
+    } else if (strcmp(call->callee, "ReadSize") == 0) {
+      // ReadSize(file) -> int
+      ASTNode *file = call->args;
+      if (file) {
+        gen_expr(cg, file);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call vyl_filesize@plt\n");
+      }
     } else if (strcmp(call->callee, "Write") == 0) {
       // Write(file, data) -> bytes written
       ASTNode *file = call->args;
@@ -678,8 +770,10 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
       ASTNode *cmd = call->args;
       if (cmd) {
         gen_expr(cg, cmd);
+        fprintf(cg->out, "    sub rsp, 8\n");        // Stack alignment for system()
         fprintf(cg->out, "    mov rdi, rax\n");
         fprintf(cg->out, "    call system@plt\n");
+        fprintf(cg->out, "    add rsp, 8\n");        // Clean up stack
         // rax has exit code
       }
     } else if (strcmp(call->callee, "Exit") == 0) {
@@ -791,6 +885,16 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
         // Null terminate
         fprintf(cg->out, "    pop rax\n"); // result
         fprintf(cg->out, "    mov byte ptr [rax + r13], 0\n");
+      }
+    } else if (strcmp(call->callee, "System") == 0 ||
+               strcmp(call->callee, "Exec") == 0) {
+      // System/Exec(command) -> exit code
+      ASTNode *cmd = call->args;
+      if (cmd) {
+        gen_expr(cg, cmd);
+        fprintf(cg->out, "    mov rdi, rax\n");
+        fprintf(cg->out, "    call system@plt\n");
+        // rax has exit code
       }
     } else {
       gen_expr(cg, node);
@@ -913,6 +1017,7 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
         cg->locals[cg->local_count].name = strdup(name);
         cg->locals[cg->local_count].offset = offset;
         cg->locals[cg->local_count].type = get_expr_type(cg, assign->expr);
+        cg->locals[cg->local_count].array_size = 1;
 
         // Register Promotion for inline assignments too
         static const char *reg_pool[] = {"rbx", "r12", "r13", "r14", "r15"};
@@ -943,6 +1048,23 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
       if (in->base_expr->type == NODE_VAR) {
         const char *name = ((VarNode *)in->base_expr)->name;
         int offset = get_local_offset(cg, name);
+        int arr_size = get_local_array_size(cg, name);
+        int msg_id = get_string_id("Index out of bounds\n");
+        static int bound_idx2 = 0;
+        int cur2 = bound_idx2++;
+        // bounds check for write: r10 >= 0 && r10 < arr_size
+        fprintf(cg->out, "    mov r11, r10\n");
+        fprintf(cg->out, "    cmp r11, 0\n");
+        fprintf(cg->out, "    jl .Lbound_write_fail%d\n", cur2);
+        fprintf(cg->out, "    mov r12, %d\n", arr_size);
+        fprintf(cg->out, "    cmp r11, r12\n");
+        fprintf(cg->out, "    jae .Lbound_write_fail%d\n", cur2);
+        fprintf(cg->out, "    jmp .Lbound_write_ok%d\n", cur2);
+        fprintf(cg->out, ".Lbound_write_fail%d:\n", cur2);
+        fprintf(cg->out, "    lea rdi, [rip + str_%d]\n", msg_id);
+        fprintf(cg->out, "    call vyl_panic@plt\n");
+        fprintf(cg->out, ".Lbound_write_ok%d:\n", cur2);
+
         fprintf(cg->out, "    lea rcx, [rbp - %d]\n", offset);
         fprintf(cg->out, "    shl r10, 3\n");
         fprintf(cg->out, "    sub rcx, r10\n");
@@ -1053,7 +1175,12 @@ void codegen_generate(CodeGen *cg, ASTNode *root) {
   fclose(text_stream);
   cg->out = real_out;
   fprintf(cg->out, ".intel_syntax noprefix\n.extern printf\n.extern "
-                   "clock\n.section .data\n");
+                   "clock\n.extern system\n.extern sqrt\n.extern sin\n.extern cos\n.extern tan\n"
+                   ".extern fabs\n.extern floor\n.extern ceil\n.extern pow\n"
+                   ".extern strcmp\n.extern fopen\n.extern fclose\n"
+                   ".extern vyl_read_file\n.extern vyl_readline_file\n"
+                   ".extern vyl_filesize\n.extern vyl_stringsplit\n"
+                   ".section .rodata\n");
   StringConst *s = strings_head;
   while (s) {
     fprintf(cg->out, "str_%d: .asciz \"", s->id);
@@ -1073,6 +1200,7 @@ void codegen_generate(CodeGen *cg, ASTNode *root) {
 
   DecimalConst *d = decimals_head;
   while (d) {
+    fprintf(cg->out, ".align 8\n");
     fprintf(cg->out, "dec_const_%d: .double %f\n", d->id, d->value);
     d = d->next;
   }

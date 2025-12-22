@@ -31,14 +31,17 @@ Token peek_token_ahead(Parser *parser, int offset) {
 Token consume_token(Parser *parser, TokenType type, const char *value) {
   Token token = peek_token(parser);
   if (type != TOKEN_EOF && token.type != type) {
-    fprintf(stderr, "Parser Error: Expected token type %s, got %s at line %d\n",
-            token_type_to_string(type), token_type_to_string(token.type),
-            token.line);
+    fprintf(stderr, "Parser Error at line %d:\n", token.line);
+    fprintf(stderr, "  Expected: %s\n", token_type_to_string(type));
+    fprintf(stderr, "  Found: %s", token_type_to_string(token.type));
+    if (token.value) fprintf(stderr, " ('%s')", token.value);
+    fprintf(stderr, "\n");
     exit(1);
   }
   if (value != NULL && strcmp(token.value, value) != 0) {
-    fprintf(stderr, "Parser Error: Expected value '%s', got '%s' at line %d\n",
-            value, token.value, token.line);
+    fprintf(stderr, "Parser Error at line %d:\n", token.line);
+    fprintf(stderr, "  Expected: '%s'\n", value);
+    fprintf(stderr, "  Found: '%s'\n", token.value);
     exit(1);
   }
   parser->pos++;

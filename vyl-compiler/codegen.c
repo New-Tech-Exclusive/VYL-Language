@@ -1034,10 +1034,16 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
           fprintf(cg->out, "    sub rsp, 8\n");
       }
 
+      VylType var_type = get_local_type(cg, name);
       if (reg) {
+        // reg is only used for integer/bool scalars
         fprintf(cg->out, "    mov %s, rax\n", reg);
       } else {
-        fprintf(cg->out, "    mov [rbp - %d], rax\n", offset);
+        if (var_type == VYL_TYPE_DEC) {
+          fprintf(cg->out, "    movsd [rbp - %d], xmm0\n", offset);
+        } else {
+          fprintf(cg->out, "    mov [rbp - %d], rax\n", offset);
+        }
       }
     } else if (assign->target->type == NODE_INDEX) {
       IndexNode *in = (IndexNode *)assign->target;
@@ -1068,7 +1074,13 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
         fprintf(cg->out, "    lea rcx, [rbp - %d]\n", offset);
         fprintf(cg->out, "    shl r10, 3\n");
         fprintf(cg->out, "    sub rcx, r10\n");
-        fprintf(cg->out, "    mov [rcx], rax\n");
+
+        VylType elem_type = get_local_type(cg, name);
+        if (elem_type == VYL_TYPE_DEC) {
+          fprintf(cg->out, "    movsd [rcx], xmm0\n");
+        } else {
+          fprintf(cg->out, "    mov [rcx], rax\n");
+        }
       }
     } else if (assign->target->type == NODE_MEMBER_ACCESS) {
       MemberAccessNode *ma = (MemberAccessNode *)assign->target;
@@ -1080,20 +1092,17 @@ void gen_statement(CodeGen *cg, ASTNode *node) {
       if (struct_name) {
         StructInfo *si = get_struct_info(cg, struct_name);
         if (si) {
-          int offset = get_field_offset(si, ma->member_name);
-          if (offset != -1) {
-            fprintf(cg->out, "    mov [r11 + %d], rax\n", offset);
+          int foffset = get_field_offset(si, ma->member_name);
+          if (foffset != -1) {
+            VylType field_type = get_expr_type(cg, assign->expr);
+            if (field_type == VYL_TYPE_DEC)
+              fprintf(cg->out, "    movsd [r11 + %d], xmm0\n", foffset);
+            else
+              fprintf(cg->out, "    mov [r11 + %d], rax\n", foffset);
           }
         }
       }
     }
-  } else if (node->type == NODE_BREAK) {
-    if (cg->current_loop_end) {
-      fprintf(cg->out, "    jmp %s\n", cg->current_loop_end);
-    } else {
-      fprintf(stderr, "Error: break statement outside of loop\n");
-    }
-  } else if (node->type == NODE_CONTINUE) {
     if (cg->current_loop_start) {
       fprintf(cg->out, "    jmp %s\n", cg->current_loop_start);
     } else {

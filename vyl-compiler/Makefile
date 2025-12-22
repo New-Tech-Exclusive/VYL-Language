@@ -14,4 +14,11 @@ $(TARGET): $(OBJS)
 clean:
 	rm -f $(OBJS) $(TARGET)
 
+release: CFLAGS = -Wall -Wextra -std=c99 -D_POSIX_C_SOURCE=200809L -O3 -flto -march=native -DNDEBUG -lm
+release: TARGET = vyl-release
+release: $(OBJS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) -lm
+
+.PHONY: release
+
 .PHONY: all clean

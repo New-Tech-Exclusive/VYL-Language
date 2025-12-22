@@ -1,0 +1,57 @@
+Main() {
+    var greeting = "Hello, World!"
+    var newline_test = "Line 1\nLine 2"
+    var tab_test = "Col1\tCol2\tCol3"
+    var escaped_quote = "She said \"Hello!\""
+    var backslash = "Path: C:\\Users\\Name"
+    
+    var first = "Hello"
+    var second = " "
+    var third = "VYL"
+    var combined = first + second + third
+    
+    var name = "Alice"
+    var message = "Welcome, " + name + "!"
+    
+    Print("=== String Test Results ===")
+    Print("")
+    
+    Print("Basic string literal:")
+    Print(greeting)
+    Print("")
+    
+    Print("Escape sequences:")
+    Print("Newline test:")
+    Print(newline_test)
+    Print("")
+    
+    Print("Tab test:")
+    Print(tab_test)
+    Print("")
+    
+    Print("Quote escape:")
+    Print(escaped_quote)
+    Print("")
+    
+    Print("Backslash escape:")
+    Print(backslash)
+    Print("")
+    
+    Print("String concatenation with +:")
+    Print("Combined result: " + combined)
+    Print("")
+    
+    Print("Dynamic concatenation:")
+    Print(message)
+    Print("")
+    
+    var a = "The"
+    var b = "Quick"
+    var c = "Brown"
+    var d = "Fox"
+    var sentence = a + " " + b + " " + c + " " + d
+    Print("Built sentence: " + sentence)
+    Print("")
+    
+    Print("=== All string tests passed! ===")
+}

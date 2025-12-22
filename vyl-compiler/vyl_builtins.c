@@ -113,6 +113,20 @@ void vyl_free_string_array(char **arr) {
   free(arr);
 }
 
+// String concatenation
+char* vyl_string_concat(const char *a, const char *b) {
+  if (!a) a = "";
+  if (!b) b = "";
+  
+  size_t len = strlen(a) + strlen(b) + 1;
+  char *result = (char *)malloc(len);
+  if (!result) return NULL;
+  
+  strcpy(result, a);
+  strcat(result, b);
+  return result;
+}
+
 // Simple panic helper used by generated code for bounds checks
 void vyl_panic(const char *msg) {
   if (msg)
@@ -121,6 +135,16 @@ void vyl_panic(const char *msg) {
     fprintf(stderr, "Runtime Error\n");
   exit(1);
 }
+
+// Error reporting with code
+void vyl_error(const char *msg, int code) {
+  if (msg)
+    fprintf(stderr, "Error [%d]: %s\n", code, msg);
+  else
+    fprintf(stderr, "Error [%d]\n", code);
+  exit(code);
+}
+
 
 int vyl_to_int(const char *s) {
   if (!s) return 0;
@@ -166,3 +190,223 @@ long vyl_array_len(void *arr) {
   // Unknown for generic pointers; compiler can optimize ArrayLen at compile time
   return -1;
 }
+
+// ============================================================================
+// Dynamic List (Array) Implementation
+// ============================================================================
+
+typedef struct {
+  void **items;
+  long count;
+  long capacity;
+} VylList;
+
+void* vyl_list_new(void) {
+  VylList *list = (VylList *)malloc(sizeof(VylList));
+  if (!list) return NULL;
+  
+  list->capacity = 16;
+  list->count = 0;
+  list->items = (void **)malloc(sizeof(void *) * list->capacity);
+  
+  if (!list->items) {
+    free(list);
+    return NULL;
+  }
+  
+  return (void *)list;
+}
+
+void vyl_list_append(void *list, void *item) {
+  if (!list) return;
+  
+  VylList *vlist = (VylList *)list;
+  
+  // Grow capacity if needed
+  if (vlist->count >= vlist->capacity) {
+    vlist->capacity *= 2;
+    void **new_items = (void **)realloc(vlist->items, sizeof(void *) * vlist->capacity);
+    if (!new_items) return;
+    vlist->items = new_items;
+  }
+  
+  vlist->items[vlist->count++] = item;
+}
+
+long vyl_list_len(void *list) {
+  if (!list) return 0;
+  return ((VylList *)list)->count;
+}
+
+void* vyl_list_get(void *list, long index) {
+  if (!list) return NULL;
+  
+  VylList *vlist = (VylList *)list;
+  if (index < 0 || index >= vlist->count) return NULL;
+  
+  return vlist->items[index];
+}
+
+void vyl_list_set(void *list, long index, void *item) {
+  if (!list) return;
+  
+  VylList *vlist = (VylList *)list;
+  if (index < 0 || index >= vlist->count) return;
+  
+  vlist->items[index] = item;
+}
+
+void vyl_list_free(void *list) {
+  if (!list) return;
+  
+  VylList *vlist = (VylList *)list;
+  if (vlist->items) {
+    free(vlist->items);
+  }
+  free(vlist);
+}
+
+// ============================================================================
+// Hash Map (Dictionary) Implementation
+// ============================================================================
+
+typedef struct DictEntry {
+  char *key;
+  void *value;
+  VylValueType type;
+  struct DictEntry *next;
+} DictEntry;
+
+typedef struct {
+  DictEntry **buckets;
+  int bucket_count;
+  long entry_count;
+} VylDict;
+
+#define DICT_INITIAL_BUCKETS 16
+
+static unsigned long hash_string(const char *str) {
+  unsigned long hash = 5381;
+  int c;
+  while ((c = *str++)) {
+    hash = ((hash << 5) + hash) + c;
+  }
+  return hash;
+}
+
+void* vyl_dict_new(void) {
+  VylDict *dict = (VylDict *)malloc(sizeof(VylDict));
+  if (!dict) return NULL;
+  
+  dict->bucket_count = DICT_INITIAL_BUCKETS;
+  dict->entry_count = 0;
+  dict->buckets = (DictEntry **)calloc(dict->bucket_count, sizeof(DictEntry *));
+  
+  if (!dict->buckets) {
+    free(dict);
+    return NULL;
+  }
+  
+  return (void *)dict;
+}
+
+void vyl_dict_set(void *dict, const char *key, void *value) {
+  // Default: treat as pointer (backwards compat)
+  vyl_dict_set_typed(dict, key, value, VYL_VALUE_PTR);
+}
+
+// New functions for typed storage
+void vyl_dict_set_string(void *dict, const char *key, const char *value) {
+  vyl_dict_set_typed(dict, key, (void *)value, VYL_VALUE_STRING);
+}
+
+void vyl_dict_set_int(void *dict, const char *key, long value) {
+  // Store int as pointer (using casting trick)
+  vyl_dict_set_typed(dict, key, (void *)value, VYL_VALUE_INT);
+}
+
+void vyl_dict_set_typed(void *dict, const char *key, void *value, VylValueType type) {
+  if (!dict || !key) return;
+  
+  VylDict *vdict = (VylDict *)dict;
+  unsigned long hash = hash_string(key);
+  int bucket = hash % vdict->bucket_count;
+  
+  // Check if key exists and update
+  DictEntry *entry = vdict->buckets[bucket];
+  while (entry) {
+    if (strcmp(entry->key, key) == 0) {
+      entry->value = value;
+      entry->type = type;
+      return;
+    }
+    entry = entry->next;
+  }
+  
+  // Create new entry
+  entry = (DictEntry *)malloc(sizeof(DictEntry));
+  if (!entry) return;
+  
+  entry->key = strdup(key);
+  entry->value = value;
+  entry->type = type;
+  entry->next = vdict->buckets[bucket];
+  vdict->buckets[bucket] = entry;
+  vdict->entry_count++;
+}
+
+void* vyl_dict_get(void *dict, const char *key) {
+  if (!dict || !key) return NULL;
+  
+  VylDict *vdict = (VylDict *)dict;
+  unsigned long hash = hash_string(key);
+  int bucket = hash % vdict->bucket_count;
+  
+  DictEntry *entry = vdict->buckets[bucket];
+  while (entry) {
+    if (strcmp(entry->key, key) == 0) {
+      return entry->value;
+    }
+    entry = entry->next;
+  }
+  
+  return NULL;
+}
+
+VylValueType vyl_dict_get_type(void *dict, const char *key) {
+  if (!dict || !key) return VYL_VALUE_PTR;
+  
+  VylDict *vdict = (VylDict *)dict;
+  unsigned long hash = hash_string(key);
+  int bucket = hash % vdict->bucket_count;
+  
+  DictEntry *entry = vdict->buckets[bucket];
+  while (entry) {
+    if (strcmp(entry->key, key) == 0) {
+      return entry->type;
+    }
+    entry = entry->next;
+  }
+  
+  return VYL_VALUE_PTR;
+}
+
+void vyl_dict_free(void *dict) {
+  if (!dict) return;
+  
+  VylDict *vdict = (VylDict *)dict;
+  
+  for (int i = 0; i < vdict->bucket_count; i++) {
+    DictEntry *entry = vdict->buckets[i];
+    while (entry) {
+      DictEntry *next = entry->next;
+      if (entry->key) free(entry->key);
+      free(entry);
+      entry = next;
+    }
+  }
+  
+  if (vdict->buckets) free(vdict->buckets);
+  free(vdict);
+}
+

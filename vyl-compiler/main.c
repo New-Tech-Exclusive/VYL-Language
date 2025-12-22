@@ -78,6 +78,9 @@ int main(int argc, char **argv) {
   FILE *out = fopen(asm_path, "w");
   if (!out) {
     fprintf(stderr, "Error: Could not create output file %s\n", asm_path);
+    free_ast(ast);
+    free_tokens(tokens, count);
+    free(source);
     return 1;
   }
 
@@ -90,10 +93,16 @@ int main(int argc, char **argv) {
   char cmd[1024];
   char exe_path[256];
   snprintf(exe_path, 255, "%s.vylo", base_name);
-  snprintf(cmd, 1024, "gcc %s -o %s", asm_path, exe_path);
+  snprintf(cmd, 1024, "gcc %s /media/bentley/2TB/repos/vyl-lang/vyl-compiler/vyl_builtins_release.o -o %s -lm", asm_path, exe_path);
 
   if (system(cmd) != 0) {
     fprintf(stderr, "Error: Build failed (gcc error).\n");
+    remove(asm_path);
+    codegen_cleanup(&cg);
+    codegen_free();
+    free_ast(ast);
+    free_tokens(tokens, count);
+    free(source);
     return 1;
   }
 

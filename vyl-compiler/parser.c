@@ -31,17 +31,21 @@ Token peek_token_ahead(Parser *parser, int offset) {
 Token consume_token(Parser *parser, TokenType type, const char *value) {
   Token token = peek_token(parser);
   if (type != TOKEN_EOF && token.type != type) {
-    fprintf(stderr, "Parser Error at line %d:\n", token.line);
-    fprintf(stderr, "  Expected: %s\n", token_type_to_string(type));
-    fprintf(stderr, "  Found: %s", token_type_to_string(token.type));
+    fprintf(stderr, "\n");
+    fprintf(stderr, "┌─ Parser Error at line %d\n", token.line);
+    fprintf(stderr, "├─ Expected: %s\n", token_type_to_string(type));
+    fprintf(stderr, "├─ Found:    %s", token_type_to_string(token.type));
     if (token.value) fprintf(stderr, " ('%s')", token.value);
     fprintf(stderr, "\n");
+    fprintf(stderr, "└─ Check your syntax and try again\n\n");
     exit(1);
   }
   if (value != NULL && strcmp(token.value, value) != 0) {
-    fprintf(stderr, "Parser Error at line %d:\n", token.line);
-    fprintf(stderr, "  Expected: '%s'\n", value);
-    fprintf(stderr, "  Found: '%s'\n", token.value);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "┌─ Parser Error at line %d\n", token.line);
+    fprintf(stderr, "├─ Expected keyword or symbol: '%s'\n", value);
+    fprintf(stderr, "├─ Found: '%s'\n", token.value);
+    fprintf(stderr, "└─ Check spelling and syntax\n\n");
     exit(1);
   }
   parser->pos++;
@@ -422,7 +426,7 @@ ASTNode *parse_sum(Parser *parser) {
       consume_token(parser, t.type, NULL);
       ASTNode *right = parse_factor(parser);
 
-      // Constant Folding
+      // Constant Folding for numbers
       if (left->type == NODE_NUMBER && right->type == NODE_NUMBER) {
         int a = ((NumberNode *)left)->value;
         int b = ((NumberNode *)right)->value;
@@ -435,6 +439,19 @@ ASTNode *parse_sum(Parser *parser) {
         double b = ((DecimalNode *)right)->value;
         double res = (t.type == TOKEN_PLUS) ? (a + b) : (a - b);
         ((DecimalNode *)left)->value = res;
+        free_ast(right);
+        continue;
+      }
+      
+      // String concatenation with + operator
+      if (t.type == TOKEN_PLUS && left->type == NODE_STRING && right->type == NODE_STRING) {
+        char *a = ((StringNode *)left)->value;
+        char *b = ((StringNode *)right)->value;
+        size_t len = strlen(a) + strlen(b) + 1;
+        char *result = malloc(len);
+        strcpy(result, a);
+        strcat(result, b);
+        ((StringNode *)left)->value = result;
         free_ast(right);
         continue;
       }
@@ -792,11 +809,49 @@ ASTNode *parse_statement(Parser *parser) {
 }
 
 ASTNode *parse_main(Parser *parser) {
-  // Legacy support for Main() block
+  // Support Main() or Main(argc, argv)
   consume_token(parser, TOKEN_KEYWORD, "Main");
   consume_token(parser, TOKEN_LPAREN, NULL);
+  
+  // Parse parameters if any
+  int param_count = 0;
+  char **params = malloc(sizeof(char *) * 6);  // Pre-allocate to simplify cleanup
+  
+  Token t = peek_token(parser);
+  if (t.type != TOKEN_RPAREN) {
+    while (t.type != TOKEN_RPAREN && param_count < 6) {
+      Token param = consume_token(parser, TOKEN_ID, NULL);
+      params[param_count] = strdup(param.value);
+      param_count++;
+      
+      t = peek_token(parser);
+      if (t.type == TOKEN_COMMA) {
+        consume_token(parser, TOKEN_COMMA, NULL);
+        t = peek_token(parser);
+      }
+    }
+  }
+  
   consume_token(parser, TOKEN_RPAREN, NULL);
-  return parse_block(parser); // Returns list of statements
+  
+  ASTNode *body = parse_block(parser);
+  
+  // Wrap in a FunctionDefNode to represent Main with parameters
+  if (param_count > 0) {
+    FunctionDefNode *fn = malloc(sizeof(FunctionDefNode));
+    fn->base.type = NODE_MAIN;
+    fn->base.next = NULL;
+    fn->name = malloc(5);
+    strcpy(fn->name, "main");
+    fn->param_count = param_count;
+    fn->params = params;
+    fn->body = body;
+    return (ASTNode *)fn;
+  }
+  
+  // Free unused params array when no parameters
+  free(params);
+  return body; // Return list of statements
 }
 
 ASTNode *parser_parse(Parser *parser) {
@@ -868,7 +923,7 @@ void free_ast(ASTNode *node) {
 
     if (node->type == NODE_PROGRAM) {
       free_ast(((ProgramNode *)node)->nodes);
-    } else if (node->type == NODE_FUNCTION_DEF) {
+    } else if (node->type == NODE_FUNCTION_DEF || node->type == NODE_MAIN) {
       FunctionDefNode *fn = (FunctionDefNode *)node;
       if (fn->name)
         free(fn->name);
@@ -965,31 +1020,15 @@ void free_ast(ASTNode *node) {
       free_ast(ma->struct_expr);
       if (ma->member_name)
         free(ma->member_name);
-    } else if (node->type == NODE_NEW) {
-      NewNode *nn = (NewNode *)node;
-      if (nn->type_name)
-        free(nn->type_name);
-    } else if (node->type == NODE_FOR) {
-      ForNode *f = (ForNode *)node;
-      if (f->iterator_name)
-        free(f->iterator_name);
-      free_ast(f->start);
-      free_ast(f->end);
-      free_ast(f->body);
-    } else if (node->type == NODE_MATCH) {
-      MatchNode *m = (MatchNode *)node;
-      free_ast(m->target);
-      for (int i = 0; i < m->case_count; i++) {
-        free_ast(m->cases[i].value);
-        free_ast(m->cases[i].body);
-      }
-      if (m->cases)
-        free(m->cases);
     } else if (node->type == NODE_WHILE) {
       WhileNode *wn = (WhileNode *)node;
       free_ast(wn->condition);
       free_ast(wn->body);
     } else if (node->type == NODE_VYL_NEWLINE) {
+      // Just the node
+    } else if (node->type == NODE_BREAK) {
+      // Just the node
+    } else if (node->type == NODE_CONTINUE) {
       // Just the node
     }
 

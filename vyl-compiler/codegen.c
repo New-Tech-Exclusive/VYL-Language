@@ -15,9 +15,9 @@ void gen_if(CodeGen *cg, IfNode *node);
 static void codegen_error(const char *format, ...) {
   va_list args;
   va_start(args, format);
-  fprintf(stderr, "CodeGen Error: ");
+  fprintf(stderr, "\n┌─ CodeGen Error\n├─ ");
   vfprintf(stderr, format, args);
-  fprintf(stderr, "\n");
+  fprintf(stderr, "\n└─ Review your VYL code and variable declarations\n\n");
   va_end(args);
 }
 
@@ -116,9 +116,40 @@ VylType get_expr_type(CodeGen *cg, ASTNode *node) {
     return VYL_TYPE_DEC;
   if (node->type == NODE_VAR)
     return get_local_type(cg, ((VarNode *)node)->name);
+  if (node->type == NODE_BINARY_OP) {
+    BinaryNode *bin = (BinaryNode *)node;
+    VylType left_type = get_expr_type(cg, bin->left);
+    VylType right_type = get_expr_type(cg, bin->right);
+    // String concatenation returns a string
+    if (bin->op == TOKEN_PLUS && left_type == VYL_TYPE_STRING && right_type == VYL_TYPE_STRING)
+      return VYL_TYPE_STRING;
+    // Decimal operations return decimal
+    if (left_type == VYL_TYPE_DEC || right_type == VYL_TYPE_DEC)
+      return VYL_TYPE_DEC;
+    // Default to int for other operations
+    return VYL_TYPE_INT;
+  }
   if (node->type == NODE_CALL) {
     CallNode *call = (CallNode *)node;
     if (strcmp(call->callee, "Clock") == 0)
+      return VYL_TYPE_DEC;
+    // Functions that always return strings
+    if (strcmp(call->callee, "Read") == 0 ||
+        strcmp(call->callee, "ReadLine") == 0)
+      return VYL_TYPE_STRING;
+    // For now, assume DictGet returns STRING if called directly
+    // (In a full type system, we'd track what was stored)
+    if (strcmp(call->callee, "DictGet") == 0)
+      return VYL_TYPE_STRING;
+    // Functions that always return decimals
+    if (strcmp(call->callee, "Sqrt") == 0 ||
+        strcmp(call->callee, "Sin") == 0 ||
+        strcmp(call->callee, "Cos") == 0 ||
+        strcmp(call->callee, "Tan") == 0 ||
+        strcmp(call->callee, "Abs") == 0 ||
+        strcmp(call->callee, "Floor") == 0 ||
+        strcmp(call->callee, "Ceil") == 0 ||
+        strcmp(call->callee, "Power") == 0)
       return VYL_TYPE_DEC;
   }
 
@@ -222,6 +253,19 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
     BinaryNode *bin = (BinaryNode *)node;
     VylType left_type = get_expr_type(cg, bin->left);
     VylType right_type = get_expr_type(cg, bin->right);
+    
+    // String concatenation with + operator
+    if (left_type == VYL_TYPE_STRING && right_type == VYL_TYPE_STRING && 
+        bin->op == TOKEN_PLUS) {
+      gen_expr(cg, bin->left);
+      fprintf(cg->out, "    push rax\n");
+      gen_expr(cg, bin->right);
+      fprintf(cg->out, "    mov rsi, rax\n");
+      fprintf(cg->out, "    pop rdi\n");
+      fprintf(cg->out, "    call vyl_string_concat\n");
+      return;
+    }
+    
     VylType res_type = (left_type == VYL_TYPE_DEC || right_type == VYL_TYPE_DEC)
                            ? VYL_TYPE_DEC
                            : VYL_TYPE_INT;
@@ -286,6 +330,44 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
     }
   } else if (node->type == NODE_CALL) {
     CallNode *call = (CallNode *)node;
+    
+    // Special handling for DictSet to track value types
+    if (strcmp(call->callee, "DictSet") == 0) {
+      // DictSet(dict, key, value) - we need to know the type of value
+      // Count args: should be 3
+      ASTNode *dict_arg = call->args;
+      ASTNode *key_arg = dict_arg ? dict_arg->next : NULL;
+      ASTNode *val_arg = key_arg ? key_arg->next : NULL;
+      
+      // Generate code for all three args
+      gen_expr(cg, dict_arg);  // dict -> rax
+      fprintf(cg->out, "    push rax\n");
+      
+      gen_expr(cg, key_arg);   // key -> rax
+      fprintf(cg->out, "    push rax\n");
+      
+      // Determine value type
+      VylType val_type = get_expr_type(cg, val_arg);
+      gen_expr(cg, val_arg);   // value -> rax
+      fprintf(cg->out, "    push rax\n");
+      
+      // Pop into calling convention
+      fprintf(cg->out, "    pop rdx\n");  // value
+      fprintf(cg->out, "    pop rsi\n");  // key
+      fprintf(cg->out, "    pop rdi\n");  // dict
+      
+      // Call appropriate function based on type
+      if (val_type == VYL_TYPE_STRING) {
+        fprintf(cg->out, "    call vyl_dict_set_string@plt\n");
+      } else if (val_type == VYL_TYPE_INT) {
+        fprintf(cg->out, "    call vyl_dict_set_int@plt\n");
+      } else {
+        fprintf(cg->out, "    call vyl_dict_set@plt\n");
+      }
+      return;  // Skip the normal call handling below
+    }
+    
+    // Normal argument processing for other functions
     ASTNode *arg = call->args;
     int count = 0;
     while (arg) {
@@ -426,6 +508,44 @@ void gen_expr(CodeGen *cg, ASTNode *node) {
         fprintf(cg->out, "    mov rdi, rax\n");
         fprintf(cg->out, "    call vyl_array_len@plt\n");
       }
+    } else if (strcmp(call->callee, "ListNew") == 0) {
+      // ListNew() -> pointer to list
+      fprintf(cg->out, "    call vyl_list_new@plt\n");
+    } else if (strcmp(call->callee, "ListAppend") == 0) {
+      // ListAppend(list, item)
+      // Args already in rdi (list) and rsi (item)
+      fprintf(cg->out, "    call vyl_list_append@plt\n");
+    } else if (strcmp(call->callee, "ListLen") == 0) {
+      // ListLen(list) -> long
+      // Arg already in rdi
+      fprintf(cg->out, "    call vyl_list_len@plt\n");
+    } else if (strcmp(call->callee, "ListGet") == 0) {
+      // ListGet(list, index) -> item
+      // Args already in rdi (list) and rsi (index)
+      fprintf(cg->out, "    call vyl_list_get@plt\n");
+    } else if (strcmp(call->callee, "ListSet") == 0) {
+      // ListSet(list, index, item)
+      // Args already in rdi (list), rsi (index), rdx (item)
+      fprintf(cg->out, "    call vyl_list_set@plt\n");
+    } else if (strcmp(call->callee, "ListFree") == 0) {
+      // ListFree(list)
+      // Arg already in rdi
+      fprintf(cg->out, "    call vyl_list_free@plt\n");
+    } else if (strcmp(call->callee, "DictNew") == 0) {
+      // DictNew() -> pointer to dict
+      fprintf(cg->out, "    call vyl_dict_new@plt\n");
+    } else if (strcmp(call->callee, "DictSet") == 0) {
+      // DictSet(dict, key, value)
+      // Args already in rdi (dict), rsi (key), rdx (value)
+      fprintf(cg->out, "    call vyl_dict_set@plt\n");
+    } else if (strcmp(call->callee, "DictGet") == 0) {
+      // DictGet(dict, key) -> value
+      // Args already in rdi (dict) and rsi (key)
+      fprintf(cg->out, "    call vyl_dict_get@plt\n");
+    } else if (strcmp(call->callee, "DictFree") == 0) {
+      // DictFree(dict)
+      // Arg already in rdi
+      fprintf(cg->out, "    call vyl_dict_free@plt\n");
     } else {
       fprintf(cg->out, "    call %s\n", call->callee);
     }
@@ -486,7 +606,17 @@ void gen_var_decl(CodeGen *cg, VarDeclNode *node) {
   cg->locals[cg->local_count].name = strdup(node->name);
   cg->locals[cg->local_count].offset = offset;
   cg->locals[cg->local_count].array_size = size;
-  cg->locals[cg->local_count].type = node->type;
+  
+  // Infer type from initializer if type is not explicitly specified
+  VylType actual_type = node->type;
+  if (node->init && node->type == VYL_TYPE_INT && size == 1) {
+    // Type inference: if initializer is explicitly a string, use STRING type
+    VylType inferred = get_expr_type(cg, node->init);
+    if (inferred == VYL_TYPE_STRING || inferred == VYL_TYPE_DEC)
+      actual_type = inferred;
+  }
+  
+  cg->locals[cg->local_count].type = actual_type;
   cg->locals[cg->local_count].custom_type_name =
       node->custom_type_name ? strdup(node->custom_type_name) : NULL;
 
@@ -494,7 +624,7 @@ void gen_var_decl(CodeGen *cg, VarDeclNode *node) {
   // INT or BOOL (scalars only)
   static const char *reg_pool[] = {"rbx", "r12", "r13", "r14", "r15"};
   if (size == 1 && cg->local_count < 5 &&
-      (node->type == VYL_TYPE_INT || node->type == VYL_TYPE_BOOL)) {
+      (actual_type == VYL_TYPE_INT || actual_type == VYL_TYPE_BOOL)) {
     cg->locals[cg->local_count].reg = reg_pool[cg->local_count];
   } else {
     cg->locals[cg->local_count].reg = NULL;
@@ -503,7 +633,7 @@ void gen_var_decl(CodeGen *cg, VarDeclNode *node) {
   cg->local_count++;
 
   const char *reg = cg->locals[cg->local_count - 1].reg;
-  if (node->type == VYL_TYPE_DEC && size == 1) {
+  if (actual_type == VYL_TYPE_DEC && size == 1) {
     fprintf(cg->out, "    sub rsp, 8\n");
     fprintf(cg->out, "    movsd [rbp - %d], xmm0\n", offset);
   } else if (reg) {
@@ -1094,11 +1224,47 @@ void gen_main(CodeGen *cg, ASTNode *nodes) {
           "    push rbx\n    push r12\n    push r13\n    push r14\n    "
           "push r15\n");
 
+  // Check if main has parameters (argc, argv)
   ASTNode *cur = nodes;
+  FunctionDefNode *main_fn = NULL;
   while (cur) {
-    if (cur->type != NODE_FUNCTION_DEF && cur->type != NODE_IMPORT)
-      gen_statement(cg, cur);
+    if (cur->type == NODE_MAIN) {
+      main_fn = (FunctionDefNode *)cur;
+      break;
+    }
     cur = cur->next;
+  }
+  
+  // If Main has parameters, bind argc (rdi) and argv (rsi)
+  if (main_fn && main_fn->param_count > 0) {
+    const char *param_regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+    for (int i = 0; i < main_fn->param_count && i < 6; i++) {
+      cg->stack_pointer += 8;
+      int offset = cg->stack_pointer;
+      cg->locals[cg->local_count].name = strdup(main_fn->params[i]);
+      cg->locals[cg->local_count].offset = offset;
+      cg->locals[cg->local_count].reg = NULL;
+      cg->locals[cg->local_count].type = VYL_TYPE_INT; // argc is int, argv is pointer
+      cg->local_count++;
+      fprintf(cg->out, "    sub rsp, 8\n    mov [rbp - %d], %s\n", offset,
+              param_regs[i]);
+    }
+    // Generate the main function body if it exists
+    if (main_fn->body) {
+      ASTNode *body_cur = main_fn->body;
+      while (body_cur) {
+        gen_statement(cg, body_cur);
+        body_cur = body_cur->next;
+      }
+    }
+  } else {
+    // Legacy: no parameters, generate all top-level statements
+    cur = nodes;
+    while (cur) {
+      if (cur->type != NODE_FUNCTION_DEF && cur->type != NODE_IMPORT && cur->type != NODE_MAIN)
+        gen_statement(cg, cur);
+      cur = cur->next;
+    }
   }
 
   // Pop callee-saved registers
@@ -1129,8 +1295,12 @@ void codegen_generate(CodeGen *cg, ASTNode *root) {
                    ".extern fabs\n.extern floor\n.extern ceil\n.extern pow\n"
                    ".extern strcmp\n.extern fopen\n.extern fclose\n"
                    ".extern vyl_read_file\n.extern vyl_readline_file\n"
-                   ".extern vyl_filesize\n.extern vyl_stringsplit\n"
+                   ".extern vyl_filesize\n.extern vyl_stringsplit\n.extern vyl_string_concat\n"
                    ".extern vyl_to_int\n.extern vyl_to_decimal\n.extern vyl_to_string_int\n.extern vyl_free_ptr\n.extern vyl_array_len\n"
+                   ".extern vyl_list_new\n.extern vyl_list_append\n.extern vyl_list_len\n"
+                   ".extern vyl_list_get\n.extern vyl_list_set\n.extern vyl_list_free\n"
+                   ".extern vyl_dict_new\n.extern vyl_dict_set\n.extern vyl_dict_set_string\n.extern vyl_dict_set_int\n"
+                   ".extern vyl_dict_set_typed\n.extern vyl_dict_get\n.extern vyl_dict_get_type\n.extern vyl_dict_free\n"
                    ".extern log\n.extern exp\n.extern fmin\n.extern fmax\n.extern round\n"
                    ".section .rodata\n");
   StringConst *s = strings_head;

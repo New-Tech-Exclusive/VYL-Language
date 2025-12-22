@@ -1,0 +1,54 @@
+// Comprehensive feature showcase
+
+Main(argc, argv) {
+    Print("=== VYL Feature Showcase ===");
+    Print("Argument count: ", argc);
+    
+    // Test Lists
+    Print("\n=== Lists ===");
+    var numbers = ListNew();
+    ListAppend(numbers, 1);
+    ListAppend(numbers, 2);
+    ListAppend(numbers, 3);
+    ListAppend(numbers, 4);
+    ListAppend(numbers, 5);
+    
+    Print("Created list with 5 items");
+    Print("List length: ", ListLen(numbers));
+    Print("Item at index 0: ", ListGet(numbers, 0));
+    Print("Item at index 4: ", ListGet(numbers, 4));
+    
+    ListSet(numbers, 2, 30);
+    Print("After ListSet(list, 2, 30): ", ListGet(numbers, 2));
+    
+    // Test Dictionaries
+    Print("\n=== Dictionaries ===");
+    var config = DictNew();
+    DictSet(config, "app", "vyl-compiler");
+    DictSet(config, "version", "0.1.5");
+    DictSet(config, "author", "Developer");
+    
+    Print("Dictionary created");
+    Print("Config[app]: ", DictGet(config, "app"));
+    Print("Config[version]: ", DictGet(config, "version"));
+    Print("Config[author]: ", DictGet(config, "author"));
+    
+    // Test File I/O with the new features
+    Print("\n=== File Operations ===");
+    var file = Open("test_output.txt", "w");
+    if (file != 0) {
+        Write(file, "Feature test successful\n");
+        Close(file);
+        Print("Wrote to test_output.txt");
+    }
+    
+    // Clean up
+    Print("\n=== Cleanup ===");
+    ListFree(numbers);
+    Print("Freed list");
+    
+    DictFree(config);
+    Print("Freed dictionary");
+    
+    Print("\n=== All tests completed! ===");
+}

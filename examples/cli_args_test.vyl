@@ -1,0 +1,31 @@
+// Test CLI argument support and List/Dict functionality
+
+Main(argc, argv) {
+    Print("Command-line argument count: ", argc);
+    
+    // Create a list
+    var mylist = ListNew();
+    
+    ListAppend(mylist, 10);
+    ListAppend(mylist, 20);
+    ListAppend(mylist, 30);
+    
+    Print("List length: ", ListLen(mylist));
+    Print("First item: ", ListGet(mylist, 0));
+    Print("Second item: ", ListGet(mylist, 1));
+    
+    // Create a dictionary
+    var mydict = DictNew();
+    
+    DictSet(mydict, "name", "forge");
+    DictSet(mydict, "version", "0.1");
+    
+    Print("Dict get 'name': ", DictGet(mydict, "name"));
+    Print("Dict get 'version': ", DictGet(mydict, "version"));
+    
+    // Clean up
+    ListFree(mylist);
+    DictFree(mydict);
+    
+    Print("All tests passed!");
+}

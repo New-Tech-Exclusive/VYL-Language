@@ -1,9 +1,0 @@
-Main() {
-    //Exec() is a wrapper for System(), which is also buggy, I don't recommend using it yet.
-    // Test Exec function
-    Print("Testing Exec:\n")
-    var result = Exec("echo Hello from Exec")
-    Print("Exit code: ")
-    Print(result)
-    Print("\n")
-}

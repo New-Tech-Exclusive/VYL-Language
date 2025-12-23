@@ -1,5 +1,0 @@
-// Test error reporting
-
-Main(
-    Print("Missing closing paren
-}

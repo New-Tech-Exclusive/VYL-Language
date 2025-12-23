@@ -1,112 +1,152 @@
-# VYL Language
+# VYL Compiler - Python Implementation
 
-VYL is a high-performance, compiled language with Python-like readability and the raw speed of C. It is designed to be a modern, safe, and lightning-fast alternative to C for systems programming and computationally intensive tasks.
+A complete Python-based compiler for the VYL programming language that generates x86-64 assembly code.
 
-> "C is outdated and this could actually replace it. Please contribute."
+## Features
 
-## Key Features
+### Language Features
+- **Variables**: `var x = 10`, `var name = "John"`
+- **Types**: `int`, `dec`, `string`, `bool`
+- **Arithmetic**: `+`, `-`, `*`, `/`
+- **Comparison**: `==`, `!=`, `<`, `>`, `<=`, `>=`
+- **Control Flow**: `if/else`, `while`, `for`
+- **Functions**: `Main() { ... }`, user-defined functions
+- **Built-ins**: `Print()`, `Clock()`
 
-- **Blazing Fast**: Advanced codegen and register promotion make VYL **2x faster** than unoptimized native C.
-- **Smart Typing**: Supports explicit typing (`int`, `dec`, `string`, `bool`) and **implicit typing** (defaults to `int`).
-- **Memory Safe**: Built-in protection against leaks and buffer overflows (ASAN integrated).
-- **Clean Syntax**: No semi-colons*, no fluff. Python-inspired structure with `{}` blocks.
-- **VS Code Support**: Semantic highlighting and custom file icons.
+### Compiler Features
+- **Lexer**: Tokenizes source code with full error reporting
+- **Parser**: Builds AST with proper operator precedence
+- **Codegen**: Generates x86-64 assembly with symbol tables
+- **CLI**: Command-line interface with multiple output options
 
-## Performance Benchmark
+## Architecture
 
-1,000,000,000 count loop:
-- **VYL (v0.1.5)**: **0.19s** (**2x faster than C**)
-- **C (unoptimized)**: 0.39s
-- **Python**: 29.84s (VYL is ~150x faster)
-
-## NOTICE
-
-- VYL is *currently in development* and lacks many features, such as proper multi-file compilation, good error messages, and more.
-- VYL is, and will always be, free and open source software. If you find VYL useful, please consider contributing to the project.
-- Please don't do what every major company did to ASM and make a bunch of weird versions of it. VYL is language designed to be simple, fast, and easy to use.
-- VYL is meant to be a direct replacement for C, I know languages like Rust, Zig, and C++ exist, but I find them hard to use, read, and learn.
-- VYL is unstable*, don't expect it to just work. It's still in development and lacks many features. To make it stable, I need contributors.
-
-## Syntax Overview
-
-### Variables and Types
-```vyl
-var x = 10               // Implicit int
-var int count = 1000      // Explicit int
-var dec pi = 3.14159
-var string s = "VYL"
-var bool active = true
+```
+vyl/
+├── __init__.py      # Package initialization
+├── lexer.py         # Tokenization and lexical analysis
+├── parser.py        # AST construction
+├── codegen.py       # Assembly generation
+└── main.py          # CLI interface
 ```
 
-### Control Flow
-```vyl
-if (active) {
-    Print("VYL is live")
-}
+## Usage
 
-while (count > 0) {
-    count = count - 1
-}
+### Basic Compilation
+```bash
+python3 -m vyl.main program.vyl
 ```
 
-### Arrays
-```vyl
-var int[5] numbers
-numbers[0] = 10
-numbers[1] = 20
-Print(numbers[0] + numbers[1]) // Prints 30
+### Generate Assembly Only
+```bash
+python3 -m vyl.main program.vyl -S
 ```
 
-### Modules
-```vyl
-include "lib.vyl"      // Textual inclusion
-import stdio          // Standard library, not always required
+### Specify Output File
+```bash
+python3 -m vyl.main program.vyl -o myprogram
 ```
 
-### Functions and Entry Point
+## Example Program
+
 ```vyl
+// Hello World in VYL
 Main() {
-    var dec start = Clock()
-    // Code here...
-    var dec end = Clock()
-    Print("Time taken (seconds): ", end - start)
+    Print("Hello, World!");
+}
+
+// Variables and arithmetic
+Main() {
+    var x = 10;
+    var y = 5;
+    var result = x + y;
+    Print(result);  // Prints: 15
+}
+
+// Control flow
+Main() {
+    var counter = 0;
+    while (counter < 3) {
+        Print(counter);
+        counter = counter + 1;
+    }
+    
+    for i in 1..5 {
+        Print(i);
+    }
 }
 ```
 
-## Getting Started
+**Important:** VYL requires semicolons at the end of statements (except for control flow blocks).
 
-### Prerequisites
-- GCC (Possibly for linking, or VYL might be able to handle it, as the VYL linker is in progress, install it to build the compiler)
-- Make (For compiling the compiler)
+## Implementation Details
 
-### Build the Compiler
-```bash
-#clone the repo
-git clone https://github.com/New-Tech-Exclusive/VYL-Language.git
-cd VYL-Language
-cd vyl-compiler
-make
-```
+### Lexer
+- Handles whitespace and comments
+- Supports escape sequences in strings
+- Distinguishes between integers and decimals
+- Recognizes keywords and identifiers
+- Tokenizes operators and punctuation
 
-### Use the Compiler
-```bash
-# Creating a symlink, I do this so its easier to run the latest compiler, I reccomend adding it to your PATH
-mkdir -p ~/.local/bin
-ln -s /full/path/to/VYL/executable ~/.local/bin/vyl
+### Parser
+- Recursive descent parser
+- Operator precedence: comparisons > addition/subtraction > multiplication/division
+- Handles all VYL language constructs
+- Detailed error reporting with line/column info
 
-# Compile only (produces .vylo and .s)
-vyl -c or --compile path/to/source.vyl
-./path/to/source.vylo
-```
+### Code Generator
+- Symbol table management (global/local scopes)
+- Stack frame allocation for local variables
+- Control flow with labels
+- Built-in function implementations
+- String literal management
 
-## VS Code Extension
-Install the pre-built [vyl-lang.vsix](file:///media/bentley/2TB/repos/vyl-lang/src/vyl-lang.vsix) located in the `src` directory to get full syntax highlighting.
+### Built-in Functions
+- `print_int`: Prints integer values
+- `print_string`: Prints string literals
+- `clock`: Placeholder for timing functions
 
-## Contribute
-VYL is a community-driven project. We aim to catch up to and eventually surpass C in features, safety, and ergonomics.
+## Testing
 
-Please open an issue if you find a bug or have a feature request.
+The compiler has been tested with:
+- ✅ Basic "Hello, World!" program
+- ✅ Variable declarations and assignments
+- ✅ Arithmetic operations
+- ✅ Comparison operators
+- ✅ If/else statements
+- ✅ While loops
+- ✅ For loops
+- ✅ Mixed control flow
+
+## Compilation Pipeline
+
+1. **Lexical Analysis**: Source → Tokens
+2. **Parsing**: Tokens → AST
+3. **Code Generation**: AST → Assembly
+4. **Assembly/Linking**: Assembly → Executable (via gcc)
+
+## Requirements
+
+- Python 3.6+
+- GCC (for assembling/linking)
+
+## Error Handling
+
+The compiler provides clear error messages:
+- Syntax errors with line/column information
+- Name errors for undefined variables
+- Tokenization errors for invalid characters
+
+## Future Enhancements
+
+- [ ] Function parameters
+- [ ] Return values
+- [ ] Arrays and structs
+- [ ] Import system
+- [ ] Optimization passes
+- [ ] Debug information generation
+- [ ] Multiple file compilation
 
 ## License
 
-GPL-2.0
+This is a demonstration compiler for educational purposes.

@@ -1,4 +1,4 @@
-# VYL Compiler - Python Implementation
+# VYL Compiler
 
 A complete Python-based compiler for the VYL programming language that generates x86-64 assembly code.
 

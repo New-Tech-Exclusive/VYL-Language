@@ -39,12 +39,15 @@ KEYWORDS = {
     'var': 'VAR',
     'if': 'IF',
     'else': 'ELSE',
+    'elif': 'ELIF',
     'while': 'WHILE',
     'for': 'FOR',
     'in': 'IN',
     'struct': 'STRUCT',
     'new': 'NEW',
     'import': 'IMPORT',
+    'function': 'FUNCTION',
+    'Function': 'FUNCTION',
     'int': 'INT_TYPE',
     'dec': 'DEC_TYPE',
     'string': 'STRING_TYPE',
@@ -265,6 +268,14 @@ class Lexer:
         two_char = char + self.peek(1)
         if two_char in ['==', '!=', '<=', '>=', '..']:
             self.advance(2)
+            if two_char == '==':
+                return Token('EQ', '==', line=line, column=column)
+            if two_char == '!=':
+                return Token('NE', '!=', line=line, column=column)
+            if two_char == '<=':
+                return Token('LE', '<=', line=line, column=column)
+            if two_char == '>=':
+                return Token('GE', '>=', line=line, column=column)
             return Token(two_char, two_char, line=line, column=column)
         
         # Handle single-character tokens
@@ -277,6 +288,7 @@ class Lexer:
         if char == '=': return Token('ASSIGN', '=', line=line, column=column)
         if char == '<': return Token('LT', '<', line=line, column=column)
         if char == '>': return Token('GT', '>', line=line, column=column)
+        if char == '!': return Token('NOT', '!', line=line, column=column)
         if char == '(': return Token('LPAREN', '(', line=line, column=column)
         if char == ')': return Token('RPAREN', ')', line=line, column=column)
         if char == '{': return Token('LBRACE', '{', line=line, column=column)

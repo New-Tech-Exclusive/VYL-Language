@@ -56,8 +56,9 @@ def compile_vyl(source_code: str, output_file: str, generate_assembly_only: bool
         # Step 4: Assemble and link
         print("Step 4: Assembling and linking...")
         try:
+            # Link against libc and libcrypto for SHA256 helper
             result = subprocess.run([
-                'gcc', '-no-pie', asm_file, '-o', executable_file, '-lc'
+                'gcc', '-no-pie', asm_file, '-o', executable_file, '-lc', '-lcrypto'
             ], capture_output=True, text=True)
             
             if result.returncode != 0:

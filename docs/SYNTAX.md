@@ -15,6 +15,8 @@ var name = "John";            // String
 var isActive = true;          // Boolean
 ```
 
+Semicolons are required after statements except for control-flow block headers.
+
 ### Types
 - `int` - Integer numbers
 - `dec` - Decimal numbers
@@ -80,7 +82,7 @@ MyFunction();
 ```
 
 ### Main Function
-Every VYL program needs a Main function as the entry point:
+Every VYL program needs a Main function as the entry point (validated before codegen):
 ```vyl
 Main() {
     // Program starts here

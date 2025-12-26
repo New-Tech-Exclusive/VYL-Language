@@ -55,7 +55,7 @@ while (condition) {
 
 ## Program Structure
 
-VYL supports top-level execution via an optional `Main()` block.
+VYL programs start at `Main()`. Omit it and the compiler will fail validation.
 
 ```vyl
 import stdio
@@ -76,6 +76,7 @@ Main() {
 
 - **Newlines**: Use `/n` inside strings for a literal newline character.
 - **Comments**: Use `//` for single-line comments.
+- **Semicolons**: Required after statements; omit them for blocks (`if/while/for` bodies).
 
 ## Optimization Tips
 - VYL uses **Peephole Optimization** for `i = i + 1` (converted to a single `inc` instruction).

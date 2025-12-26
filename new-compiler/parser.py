@@ -221,6 +221,8 @@ class Parser:
         stmt = None
         if token_type == 'VAR':
             stmt = self.parse_var_decl()
+        elif token_type == 'FUNCTION':
+            stmt = self.parse_function_decl()
         elif token_type == 'IDENTIFIER':
             stmt = self.parse_assignment_or_call()
         elif token_type == 'IF':
@@ -243,6 +245,16 @@ class Parser:
             self.consume('SEMICOLON')
         
         return stmt
+
+    def parse_function_decl(self) -> FunctionDef:
+        """Parse: Function name() { ... }"""
+        fn_token = self.consume('FUNCTION')
+        name_tok = self.consume('IDENTIFIER')
+        self.consume('LPAREN')
+        # no parameters supported yet
+        self.consume('RPAREN')
+        body = self.parse_block()
+        return FunctionDef(name=name_tok.value, body=body, line=fn_token.line, column=fn_token.column)
     
     def parse_var_decl(self) -> VarDecl:
         """Parse: var [type] name [= value]"""
@@ -322,14 +334,29 @@ class Parser:
         condition = self.parse_expression()
         self.consume('RPAREN')
         then_block = self.parse_block()
-        
-        else_block = None
+
+        root = IfStmt(condition=condition, then_block=then_block, else_block=None, line=if_token.line, column=if_token.column)
+        current = root
+
+        # Handle zero or more elif clauses by chaining nested IfStmt in else_block
+        self.skip_newlines()
+        while self.current_token and self.current_token.type == 'ELIF':
+            elif_token = self.consume('ELIF')
+            self.consume('LPAREN')
+            elif_cond = self.parse_expression()
+            self.consume('RPAREN')
+            elif_block = self.parse_block()
+            new_if = IfStmt(condition=elif_cond, then_block=elif_block, else_block=None, line=elif_token.line, column=elif_token.column)
+            current.else_block = new_if
+            current = new_if
+            self.skip_newlines()
+
+        # Optional final else
         if self.current_token and self.current_token.type == 'ELSE':
             self.consume('ELSE')
-            else_block = self.parse_block()
-        
-        return IfStmt(condition=condition, then_block=then_block, 
-                     else_block=else_block, line=if_token.line, column=if_token.column)
+            current.else_block = self.parse_block()
+
+        return root
     
     def parse_while(self) -> WhileStmt:
         """Parse while loop"""
@@ -411,7 +438,7 @@ class Parser:
     
     def parse_unary(self) -> ASTNode:
         """Parse unary operators"""
-        if self.current_token and self.current_token.type in ['PLUS', 'MINUS']:
+        if self.current_token and self.current_token.type in ['PLUS', 'MINUS', 'NOT']:
             op = self.current_token.value
             self.advance()
             operand = self.parse_unary()

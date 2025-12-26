@@ -12,12 +12,15 @@ A complete Python-based compiler for the VYL programming language that generates
 - **Control Flow**: `if/else`, `while`, `for`
 - **Functions**: `Main() { ... }`, user-defined functions
 - **Built-ins**: `Print()`, `Clock()`
+- **Includes**: `include "other.vyl"` (or `import "other.vyl"`) to inline local files
 
 ### Compiler Features
 - **Lexer**: Tokenizes source code with full error reporting
 - **Parser**: Builds AST with proper operator precedence
-- **Codegen**: Generates x86-64 assembly with symbol tables
-- **CLI**: Command-line interface with multiple output options
+- **Validator**: Semantic checks (entrypoint, identifiers, duplicates) before codegen
+- **Include Preprocessor**: Recursively inlines local `.vyl` files (cycle-safe)
+- **Codegen**: Generates x86-64 assembly with symbol tables and better diagnostics
+- **CLI**: Command-line interface with multiple output options and targets
 
 ## Architecture
 
@@ -41,6 +44,15 @@ python3 -m vyl.main program.vyl
 ```bash
 python3 -m vyl.main program.vyl -S
 ```
+This path avoids invoking the system linker/assembler and is the most portable.
+
+### Targeting Other Formats
+- **Default ELF64 (Linux)**: `python3 -m vyl.main program.vyl`
+- **Mach-O object (macOS)**: `python3 -m vyl.main program.vyl -cm` (requires `clang` with macOS target)
+- **PE/COFF object (Windows)**: `python3 -m vyl.main program.vyl -cpe` (requires `x86_64-w64-mingw32-gcc` or a PE-capable `clang`)
+- **Flat binary via Keystone**: `python3 -m vyl.main program.vyl -S -k` (writes `program.bin` if Keystone is installed)
+
+For non-ELF targets the compiler emits assembly then assembles to an object file; linking against system libs should be done with a platform-appropriate toolchain.
 
 ### Specify Output File
 ```bash
@@ -79,6 +91,13 @@ Main() {
 
 **Important:** VYL requires semicolons at the end of statements (except for control flow blocks).
 
+### Includes
+Inline other local files with:
+```vyl
+include "utils.vyl";
+```
+Paths are resolved relative to the including file. Cyclic includes are rejected.
+
 ## Implementation Details
 
 ### Lexer
@@ -102,9 +121,17 @@ Main() {
 - String literal management
 
 ### Built-in Functions
-- `print_int`: Prints integer values
-- `print_string`: Prints string literals
-- `clock`: Placeholder for timing functions
+- `Print(val)`: Prints integers or strings (handles `GetArg`, `Read`, `SHA256` outputs as strings)
+- `Clock()`: Placeholder timing function
+- `Exists(path)`: Returns non-zero if file/folder exists
+- `CreateFolder(path)`: Creates a directory (0755)
+- `Open(path, mode)`: Opens a file (mode like `"r"`, `"rb"`, `"w"`, `"wb"`), returns FILE* handle
+- `Read(file)`: Reads entire file into a null-terminated buffer
+- `Write(file, data)`: Writes a null-terminated buffer to a file
+- `Close(file)`: Closes an opened file
+- `SHA256(data)`: Returns hex string of SHA-256 digest (uses OpenSSL libcrypto)
+- `Argc()`: Returns process argc
+- `GetArg(i)`: Returns argv[i] string pointer
 
 ## Testing
 
@@ -122,19 +149,20 @@ The compiler has been tested with:
 
 1. **Lexical Analysis**: Source → Tokens
 2. **Parsing**: Tokens → AST
-3. **Code Generation**: AST → Assembly
-4. **Assembly/Linking**: Assembly → Executable (via gcc)
+3. **Validation**: AST → Checked AST (fails fast on semantic issues)
+4. **Code Generation**: AST → Assembly
+5. **Assembly/Linking**: Assembly → Executable/Object (via platform toolchain)
 
 ## Requirements
 
-- Python 3.6+
-- GCC (for assembling/linking)
+- Keystone (optional) for generating flat binaries with `-k`
 
 ## Error Handling
 
 The compiler provides clear error messages:
 - Syntax errors with line/column information
-- Name errors for undefined variables
+- Validation errors for missing `Main`, duplicate symbols, or undefined identifiers
+- Codegen errors (with line/column) for issues encountered during emission
 - Tokenization errors for invalid characters
 
 ## Future Enhancements

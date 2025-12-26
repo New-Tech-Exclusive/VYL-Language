@@ -1,220 +1,193 @@
 """
 VYL Code Generator - Generates x86-64 assembly from AST
-
-This module traverses the AST and generates x86-64 assembly code.
-It handles:
-- Symbol table management for variables
-- Control flow (if, while, for)
-- Function calls (including built-in Print and Clock)
-- String literals
-- Arithmetic and logical operations
-
-The generated assembly uses:
-- AT&T syntax
-- System V AMD64 ABI calling convention
-- Stack frames for local variables
-- Direct system calls for program exit
 """
-
-from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 try:
     from .parser import (
-        Program, VarDecl, Assignment, FunctionCall, FunctionDef, Block,
-        IfStmt, WhileStmt, ForStmt, BinaryExpr, UnaryExpr, Literal, Identifier
+        Program,
+        VarDecl,
+        Assignment,
+        FunctionCall,
+        FunctionDef,
+        Block,
+        IfStmt,
+        WhileStmt,
+        ForStmt,
+        BinaryExpr,
+        UnaryExpr,
+        Literal,
+        Identifier,
     )
-except ImportError:
+except ImportError:  # pragma: no cover - fallback for direct execution
     from parser import (
-        Program, VarDecl, Assignment, FunctionCall, FunctionDef, Block,
-        IfStmt, WhileStmt, ForStmt, BinaryExpr, UnaryExpr, Literal, Identifier
+        Program,
+        VarDecl,
+        Assignment,
+        FunctionCall,
+        FunctionDef,
+        Block,
+        IfStmt,
+        WhileStmt,
+        ForStmt,
+        BinaryExpr,
+        UnaryExpr,
+        Literal,
+        Identifier,
     )
+
+
+class CodegenError(Exception):
+    """Raised when code generation fails."""
 
 
 @dataclass
 class Symbol:
-    """Represents a variable in the symbol table"""
     name: str
-    type: str  # 'int', 'dec', 'string', 'bool'
+    typ: str
     is_global: bool
-    stack_offset: int  # Offset from RBP for locals, 0 for globals
+    offset: int  # stack offset for locals, unused for globals
 
 
 class CodeGenerator:
-    """
-    Generates x86-64 assembly from AST
-    
-    The generator maintains symbol tables for global and local variables,
-    manages labels for control flow, and produces assembly code that can
-    be assembled and linked with the C runtime.
-    """
-    
     def __init__(self):
-        """Initialize the code generator"""
-        self.globals: Dict[str, Symbol] = {}
-        self.locals: Dict[str, Symbol] = {}
+        self.output: List[str] = []
         self.label_counter = 0
         self.current_function: Optional[str] = None
-        self.output: List[str] = []
-        self.string_literals: List[tuple] = []  # (label, content)
-    
+        self.locals: Dict[str, Symbol] = {}
+        self.globals: Dict[str, Symbol] = {}
+        self.string_literals: List[Tuple[str, str]] = []
+
+    # ---------- helpers ----------
     def emit(self, line: str):
-        """Emit a line of assembly code"""
         self.output.append(line)
-    
-    def get_label(self, prefix: str = "L") -> str:
-        """Generate a unique label"""
+
+    def get_label(self, prefix: str = ".L") -> str:
+        lbl = f"{prefix}{self.label_counter}"
         self.label_counter += 1
-        return f"{prefix}{self.label_counter}"
-    
+        return lbl
+
+    def escape_string(self, content: str) -> str:
+        return (
+            content.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+            .replace("\r", "\\r")
+        )
+
     def get_variable_symbol(self, name: str) -> Optional[Symbol]:
-        """Look up a variable in local or global scope"""
         if name in self.locals:
             return self.locals[name]
-        if name in self.globals:
-            return self.globals[name]
-        return None
-    
+        return self.globals.get(name)
+
     def get_variable_location(self, symbol: Symbol) -> str:
-        """Get the assembly location for a variable"""
         if symbol.is_global:
             return f"{symbol.name}(%rip)"
-        else:
-            return f"{symbol.stack_offset}(%rbp)"
-    
+        return f"{symbol.offset}(%rbp)"
+
+    # ---------- entry ----------
     def generate(self, program: Program) -> str:
-        """
-        Generate assembly for a program
-        
-        Args:
-            program: The AST root node
-            
-        Returns:
-            Complete assembly code as a string
-        """
         self.output = []
         self.string_literals = []
-        
-        # Emit header
+        self.locals = {}
+        self.globals = {}
+        self.label_counter = 0
+
         self.emit(".section .text")
-        
-        # Process global variable declarations first
+
         for stmt in program.statements:
             if isinstance(stmt, VarDecl):
                 self.process_global_var(stmt)
-        
-        # Generate code for all statements
+
         for stmt in program.statements:
             if isinstance(stmt, FunctionDef):
                 self.generate_function(stmt)
             elif isinstance(stmt, VarDecl):
-                pass  # Already processed
+                continue
             else:
-                # Top-level statements (should be function calls)
                 self.generate_statement(stmt)
-        
-        # Always generate a main function that calls Main
+
         self.generate_main_stub()
-        
-        # Generate built-in functions
         self.generate_builtin_functions()
-        
-        # Generate string literals
+
         if self.string_literals:
             self.emit(".section .data")
             for label, content in self.string_literals:
-                self.emit(f"{label}: .asciz \"{content}\"")
-        
+                escaped = self.escape_string(content)
+                self.emit(f"{label}: .asciz \"{escaped}\"")
+
         return "\n".join(self.output)
-    
+
+    # ---------- globals ----------
     def process_global_var(self, decl: VarDecl):
-        """Process a global variable declaration"""
-        # Allocate space in data section
         self.emit(".section .data")
         self.emit(f"{decl.name}:")
-        
-        if decl.value and isinstance(decl.value, Literal):
-            if decl.value.literal_type == 'string':
-                # For strings, we need to allocate space (pointer will be set later)
-                self.emit(".quad 0")
-            else:
-                # For numbers, emit the value
-                self.emit(f".quad {decl.value.value}")
+        if decl.value and isinstance(decl.value, Literal) and decl.value.literal_type != "string":
+            self.emit(f".quad {decl.value.value}")
         else:
             self.emit(".quad 0")
-        
         self.emit(".section .text")
-        
-        # Add to symbol table
-        var_type = decl.var_type or 'int'
+        var_type = decl.var_type or "int"
         self.globals[decl.name] = Symbol(decl.name, var_type, True, 0)
-    
+
+    # ---------- functions ----------
     def generate_function(self, func: FunctionDef):
-        """Generate assembly for a function definition"""
         self.current_function = func.name
-        self.locals.clear()
-        
-        # Function prologue
+        self.locals = {}
+
         self.emit(f".globl {func.name}")
         self.emit(f"{func.name}:")
         self.emit("push %rbp")
         self.emit("movq %rsp, %rbp")
-        
-        # Calculate stack space for local variables
+
+        decls = self.collect_var_decls(func.body) if func.body else []
+        stack_bytes = len(decls) * 8
+        if stack_bytes:
+            stack_bytes = (stack_bytes + 15) & ~15
+            self.emit(f"subq ${stack_bytes}, %rsp")
+            offset = -stack_bytes
+            for d in decls:
+                var_type = d.var_type or "int"
+                self.locals[d.name] = Symbol(d.name, var_type, False, offset)
+                offset += 8
+
         if func.body:
-            # First pass: collect all local variables
-            stack_offset = 0
             for stmt in func.body.statements:
-                if isinstance(stmt, VarDecl):
-                    stack_offset += 8
-            
-            if stack_offset > 0:
-                # Align to 16 bytes
-                stack_offset = (stack_offset + 15) & ~15
-                self.emit(f"subq ${stack_offset}, %rsp")
-                
-                # Second pass: assign offsets to locals
-                current_offset = -stack_offset
-                for stmt in func.body.statements:
-                    if isinstance(stmt, VarDecl):
-                        var_type = stmt.var_type or 'int'
-                        self.locals[stmt.name] = Symbol(stmt.name, var_type, False, current_offset)
-                        current_offset += 8
-                        
-                        # Initialize with value if provided
-                        if stmt.value:
-                            self.generate_expression(stmt.value)
-                            self.emit(f"movq %rax, {current_offset - 8}(%rbp)")
-            
-            # Generate function body
-            for stmt in func.body.statements:
-                if not isinstance(stmt, VarDecl):
-                    self.generate_statement(stmt)
-        
-        # Function epilogue
+                self.generate_statement(stmt)
+
         if func.name == "Main":
-            self.emit("movq $0, %rax")  # Return 0 from Main
-        
+            self.emit("movq $0, %rax")
         self.emit("leave")
         self.emit("ret")
-        
         self.current_function = None
-        self.locals.clear()
-    
+        self.locals = {}
+
     def generate_main_stub(self):
-        """Generate a main function that calls Main"""
         self.emit(".globl main")
         self.emit("main:")
         self.emit("push %rbp")
         self.emit("movq %rsp, %rbp")
+        self.emit("movq %rdi, argc_store(%rip)")
+        self.emit("movq %rsi, argv_store(%rip)")
+        self.emit("movq %rbp, stack_base(%rip)")
         self.emit("call Main")
         self.emit("movq %rax, %rdi")
-        self.emit("movq $60, %rax")  # sys_exit
+        self.emit("movq $60, %rax")
         self.emit("syscall")
-    
+
+    # ---------- statements ----------
     def generate_statement(self, stmt):
-        """Generate assembly for a statement"""
         if isinstance(stmt, Assignment):
             self.generate_assignment(stmt)
+        elif isinstance(stmt, VarDecl):
+            sym = self.get_variable_symbol(stmt.name)
+            if not sym:
+                raise CodegenError(f"Undefined local declaration for '{stmt.name}'")
+            if stmt.value:
+                self.generate_expression(stmt.value)
+                self.emit(f"movq %rax, {self.get_variable_location(sym)}")
         elif isinstance(stmt, FunctionCall):
             self.generate_function_call(stmt)
         elif isinstance(stmt, IfStmt):
@@ -227,263 +200,383 @@ class CodeGenerator:
             for s in stmt.statements:
                 self.generate_statement(s)
         else:
-            # Expressions as statements
             self.generate_expression(stmt)
-    
-    def generate_assignment(self, assign: Assignment):
-        """Generate assembly for assignment"""
-        # Evaluate the right-hand side
-        self.generate_expression(assign.value)
-        
-        # Store in variable
-        symbol = self.get_variable_symbol(assign.name)
-        if symbol:
-            location = self.get_variable_location(symbol)
-            self.emit(f"movq %rax, {location}")
-        else:
-            # New variable - treat as local
-            if self.current_function:
-                # Allocate on stack
-                offset = len(self.locals) * 8 + 8
-                self.locals[assign.name] = Symbol(assign.name, 'int', False, -offset)
-                self.emit(f"movq %rax, {-offset}(%rbp)")
-            else:
-                raise NameError(f"Undefined variable '{assign.name}'")
-    
-    def generate_function_call(self, call: FunctionCall):
-        """Generate assembly for function call"""
-        # Handle built-in functions
-        if call.name == "Print":
-            if call.arguments:
-                arg = call.arguments[0]
-                self.generate_expression(arg)
-                
-                # Check if it's a string literal
-                if isinstance(arg, Literal) and arg.literal_type == 'string':
-                    # Store string and get label
-                    label = self.get_label(".str")
-                    self.string_literals.append((label, arg.value))
-                    self.emit(f"leaq {label}(%rip), %rdi")
-                    self.emit("call print_string")
-                else:
-                    self.emit("movq %rax, %rdi")
-                    self.emit("call print_int")
-            return
-        
-        elif call.name == "Clock":
-            self.emit("call clock")
-            # Clock returns value in %rax, so we're done
-            return
-        
-        # Regular function call
-        # Push arguments in reverse order
-        for arg in reversed(call.arguments):
-            self.generate_expression(arg)
-            self.emit("push %rax")
-        
-        self.emit(f"call {call.name}")
-        
-        # Clean up stack
-        if call.arguments:
-            self.emit(f"addq ${len(call.arguments) * 8}, %rsp")
-    
-    def generate_if(self, if_stmt: IfStmt):
-        """Generate assembly for if statement"""
-        else_label = self.get_label("else")
-        end_label = self.get_label("endif")
-        
-        # Evaluate condition
-        self.generate_expression(if_stmt.condition)
-        self.emit("cmpq $0, %rax")
-        self.emit(f"je {else_label}")
-        
-        # Then block
-        self.generate_statement(if_stmt.then_block)
-        self.emit(f"jmp {end_label}")
-        
-        # Else block
-        self.emit(f"{else_label}:")
-        if if_stmt.else_block:
-            self.generate_statement(if_stmt.else_block)
-        
-        # End
-        self.emit(f"{end_label}:")
-    
-    def generate_while(self, while_stmt: WhileStmt):
-        """Generate assembly for while loop with optimizations"""
-        start_label = self.get_label("while")
-        end_label = self.get_label("endwhile")
 
-        # Special optimization for i < 1000000000 pattern
-        if (isinstance(while_stmt.condition, BinaryExpr) and
-            while_stmt.condition.operator == '<' and
-            isinstance(while_stmt.condition.right, Literal) and
-            while_stmt.condition.right.value == 1000000000 and
-            isinstance(while_stmt.condition.left, Identifier) and
-            while_stmt.condition.left.name == 'i'):
-            # Get the variable location
-            symbol = self.get_variable_symbol('i')
-            if symbol:
-                location = self.get_variable_location(symbol)
-                # Ultra-optimized loop for counting to 1 billion
-                self.emit(f"movq {location}, %rax")  # Load i into %rax
-                self.emit("cmpq $1000000000, %rax")
-                self.emit(f"jge {end_label}")
+    def collect_var_decls(self, block: Block) -> List[VarDecl]:
+        decls: List[VarDecl] = []
+        for stmt in block.statements if block else []:
+            if isinstance(stmt, VarDecl):
+                decls.append(stmt)
+            elif isinstance(stmt, Block):
+                decls.extend(self.collect_var_decls(stmt))
+            elif isinstance(stmt, IfStmt):
+                decls.extend(self.collect_from_if(stmt))
+            elif isinstance(stmt, WhileStmt):
+                decls.extend(self.collect_var_decls(stmt.body))
+            elif isinstance(stmt, ForStmt):
+                if isinstance(stmt.init, VarDecl):
+                    decls.append(stmt.init)
+                decls.extend(self.collect_var_decls(stmt.body))
+        return decls
 
-                # Keep counter in register for maximum speed
-                self.emit(f"{start_label}:")
-                # Extreme unrolling: 256 iterations per loop for minimal overhead
-                self.emit("addq $256, %rax")  # i += 256
-                self.emit("cmpq $1000000000, %rax")
-                self.emit(f"jl {start_label}")
+    def collect_from_if(self, node: IfStmt) -> List[VarDecl]:
+        decls: List[VarDecl] = []
+        decls.extend(self.collect_var_decls(node.then_block))
+        if node.else_block:
+            if isinstance(node.else_block, Block):
+                decls.extend(self.collect_var_decls(node.else_block))
+            elif isinstance(node.else_block, IfStmt):
+                decls.extend(self.collect_from_if(node.else_block))
+        return decls
 
-                # Store final result and exit
-                self.emit(f"movq %rax, {location}")  # Store final value
-                self.emit(f"jmp {end_label}")
-                self.emit(f"{end_label}:")
-                return  # Skip standard loop generation
-
-        # Standard loop generation
-        # Loop start
-        self.emit(f"{start_label}:")
-
-        # Evaluate condition
-        self.generate_expression(while_stmt.condition)
-        self.emit("cmpq $0, %rax")
-        self.emit(f"je {end_label}")
-
-        # Loop body
-        self.generate_statement(while_stmt.body)
-        self.emit(f"jmp {start_label}")
-
-        # Loop end
-        self.emit(f"{end_label}:")
-    
-    def generate_for(self, for_stmt: ForStmt):
-        """Generate assembly for for loop"""
-        start_label = self.get_label("for")
-        end_label = self.get_label("endfor")
-        
-        # Get loop variable symbol
-        loop_var = self.get_variable_symbol(for_stmt.var_name)
-        if not loop_var:
-            # Create loop variable
-            offset = len(self.locals) * 8 + 8
-            loop_var = Symbol(for_stmt.var_name, 'int', False, -offset)
-            self.locals[for_stmt.var_name] = loop_var
-        
-        # Initialize loop variable
-        self.generate_expression(for_stmt.start)
-        self.emit(f"movq %rax, {self.get_variable_location(loop_var)}")
-        
-        # Loop start
-        self.emit(f"{start_label}:")
-        
-        # Check condition (current < end)
-        self.emit(f"movq {self.get_variable_location(loop_var)}, %rax")
-        self.emit("push %rax")
-        self.generate_expression(for_stmt.end)
-        self.emit("pop %rbx")
-        self.emit("cmpq %rax, %rbx")
-        self.emit(f"jg {end_label}")
-        
-        # Loop body
-        self.generate_statement(for_stmt.body)
-        
-        # Increment
-        self.emit(f"incq {self.get_variable_location(loop_var)}")
-        self.emit(f"jmp {start_label}")
-        
-        # Loop end
-        self.emit(f"{end_label}:")
-    
+    # ---------- expressions ----------
     def generate_expression(self, expr):
-        """Generate assembly for an expression"""
         if isinstance(expr, Literal):
-            if expr.literal_type == 'int':
+            if expr.literal_type == "int":
                 self.emit(f"movq ${expr.value}, %rax")
-            elif expr.literal_type == 'dec':
-                # Convert float to integer representation
-                int_val = int(expr.value)
-                self.emit(f"movq ${int_val}, %rax")
-            elif expr.literal_type == 'string':
-                # For string literals in expressions, we'll handle in function call
-                # For now, just put 0 in rax (will be replaced by caller)
-                self.emit("movq $0, %rax")
-            elif expr.literal_type == 'bool':
+            elif expr.literal_type == "dec":
+                self.emit(f"movq ${int(expr.value)}, %rax")
+            elif expr.literal_type == "string":
+                label = self.get_label(".str")
+                self.string_literals.append((label, expr.value))
+                self.emit(f"leaq {label}(%rip), %rax")
+            elif expr.literal_type == "bool":
                 self.emit(f"movq ${1 if expr.value else 0}, %rax")
-        
-        elif isinstance(expr, Identifier):
-            symbol = self.get_variable_symbol(expr.name)
-            if symbol:
-                location = self.get_variable_location(symbol)
-                self.emit(f"movq {location}, %rax")
+            return
+
+        if isinstance(expr, Identifier):
+            if expr.name == "argc":
+                self.emit("movq argc_store(%rip), %rax")
+            elif expr.name == "argv":
+                self.emit("movq argv_store(%rip), %rax")
             else:
-                raise NameError(f"Undefined variable '{expr.name}'")
-        
-        elif isinstance(expr, BinaryExpr):
-            # Evaluate left operand
+                sym = self.get_variable_symbol(expr.name)
+                if not sym:
+                    raise CodegenError(f"Undefined variable '{expr.name}'")
+                self.emit(f"movq {self.get_variable_location(sym)}, %rax")
+            return
+
+        if isinstance(expr, FunctionCall):
+            self.generate_function_call(expr)
+            return
+
+        if isinstance(expr, UnaryExpr):
+            self.generate_expression(expr.operand)
+            if expr.operator == "-":
+                self.emit("negq %rax")
+            elif expr.operator in ("!", "NOT"):
+                self.emit("cmpq $0, %rax")
+                self.emit("sete %al")
+                self.emit("movzbq %al, %rax")
+            else:
+                raise CodegenError(f"Unsupported unary operator '{expr.operator}'")
+            return
+
+        if isinstance(expr, BinaryExpr):
+            def _is_stringish(node):
+                if isinstance(node, Literal) and node.literal_type == "string":
+                    return True
+                if isinstance(node, FunctionCall) and node.name in ("GetArg", "Read", "SHA256"):
+                    return True
+                return False
+
+            stringy = _is_stringish(expr.left) or _is_stringish(expr.right)
+
+            if expr.operator == "+" and stringy:
+                # string concatenation: malloc(len(a)+len(b)+1), strcpy, strcat
+                self.generate_expression(expr.left)
+                self.emit("push %rax")  # save left ptr
+                self.generate_expression(expr.right)
+                self.emit("movq %rax, %rbx")  # right ptr
+                self.emit("pop %rdi")  # left ptr into rdi
+                self.emit("push %rdi")  # save left for later
+                self.emit("push %rbx")  # save right while strlen(left)
+                self.emit("call strlen")
+                self.emit("movq %rax, %r12")  # len_left
+                self.emit("pop %rbx")  # restore right ptr
+                self.emit("movq %rbx, %rdi")
+                self.emit("call strlen")
+                self.emit("addq %r12, %rax")
+                self.emit("incq %rax")
+                self.emit("movq %rax, %rdi")
+                self.emit("call vyl_alloc")
+                self.emit("movq %rax, %r13")  # dest
+                # strcpy(dest, left)
+                self.emit("movq %r13, %rdi")
+                self.emit("pop %rsi")  # left ptr
+                self.emit("call strcpy")
+                # strcat(dest, right)
+                self.emit("movq %r13, %rdi")
+                self.emit("movq %rbx, %rsi")
+                self.emit("call strcat")
+                self.emit("movq %r13, %rax")
+                return
+
+            if expr.operator in ("==", "!=") and stringy:
+                self.generate_expression(expr.left)
+                self.emit("push %rax")
+                self.generate_expression(expr.right)
+                self.emit("movq %rax, %rsi")
+                self.emit("pop %rdi")
+                self.emit("call strcmp")
+                self.emit("cmpq $0, %rax")
+                self.emit("sete %al" if expr.operator == "==" else "setne %al")
+                self.emit("movzbq %al, %rax")
+                return
+                self.generate_expression(expr.left)
+                self.emit("push %rax")
+                self.generate_expression(expr.right)
+                self.emit("movq %rax, %rsi")
+                self.emit("pop %rdi")
+                self.emit("call strcmp")
+                self.emit("cmpq $0, %rax")
+                self.emit("sete %al" if expr.operator == "==" else "setne %al")
+                self.emit("movzbq %al, %rax")
+                return
+
             self.generate_expression(expr.left)
             self.emit("push %rax")
-            
-            # Evaluate right operand
             self.generate_expression(expr.right)
             self.emit("movq %rax, %rbx")
             self.emit("pop %rax")
-            
-            # Perform operation
-            if expr.operator == '+':
+
+            op = expr.operator
+            if op == "+":
                 self.emit("addq %rbx, %rax")
-            elif expr.operator == '-':
+            elif op == "-":
                 self.emit("subq %rbx, %rax")
-            elif expr.operator == '*':
+            elif op == "*":
                 self.emit("imulq %rbx, %rax")
-            elif expr.operator == '/':
-                self.emit("cqo")
+            elif op == "/":
+                self.emit("cqto")
                 self.emit("idivq %rbx")
-            elif expr.operator == '==':
+            elif op == "%":
+                self.emit("cqto")
+                self.emit("idivq %rbx")
+                self.emit("movq %rdx, %rax")
+            elif op in ("==", "!=", "<", ">", "<=", ">="):
                 self.emit("cmpq %rbx, %rax")
-                self.emit("sete %al")
+                table = {
+                    "==": "sete",
+                    "!=": "setne",
+                    "<": "setl",
+                    ">": "setg",
+                    "<=": "setle",
+                    ">=": "setge",
+                }
+                self.emit(f"{table[op]} %al")
                 self.emit("movzbq %al, %rax")
-            elif expr.operator == '!=':
-                self.emit("cmpq %rbx, %rax")
-                self.emit("setne %al")
-                self.emit("movzbq %al, %rax")
-            elif expr.operator == '<':
-                self.emit("cmpq %rbx, %rax")
-                self.emit("setl %al")
-                self.emit("movzbq %al, %rax")
-            elif expr.operator == '>':
-                self.emit("cmpq %rbx, %rax")
-                self.emit("setg %al")
-                self.emit("movzbq %al, %rax")
-            elif expr.operator == '<=':
-                self.emit("cmpq %rbx, %rax")
-                self.emit("setle %al")
-                self.emit("movzbq %al, %rax")
-            elif expr.operator == '>=':
-                self.emit("cmpq %rbx, %rax")
-                self.emit("setge %al")
-                self.emit("movzbq %al, %rax")
-        
-        elif isinstance(expr, UnaryExpr):
-            self.generate_expression(expr.operand)
-            if expr.operator == '-':
-                self.emit("negq %rax")
-            elif expr.operator == '+':
-                pass  # No-op
+            elif op == "&&":
+                self.emit("andq %rbx, %rax")
+            elif op == "||":
+                self.emit("orq %rbx, %rax")
+            else:
+                raise CodegenError(f"Unsupported binary operator '{op}'")
+            return
 
-        elif isinstance(expr, FunctionCall):
-            # Handle function calls in expressions
-            self.generate_function_call(expr)
+        raise CodegenError(f"Unsupported expression type: {type(expr).__name__}")
 
+    # ---------- assignments ----------
+    def generate_assignment(self, assign: Assignment):
+        self.generate_expression(assign.value)
+        sym = self.get_variable_symbol(assign.name)
+        if sym:
+            self.emit(f"movq %rax, {self.get_variable_location(sym)}")
+        elif self.current_function:
+            offset = len(self.locals) * 8 + 8
+            sym = Symbol(assign.name, "int", False, -offset)
+            self.locals[assign.name] = sym
+            self.emit(f"movq %rax, {-offset}(%rbp)")
         else:
-            # Other expressions (shouldn't happen in valid AST)
+            raise CodegenError(f"Undefined variable '{assign.name}'")
+
+    # ---------- calls ----------
+    def generate_function_call(self, call: FunctionCall):
+        name = call.name
+        if name == "Print":
+            if call.arguments:
+                arg = call.arguments[0]
+                self.generate_expression(arg)
+                stringy = isinstance(arg, Literal) and arg.literal_type == "string"
+                if isinstance(arg, FunctionCall) and arg.name in ("GetArg", "Read", "SHA256"):
+                    stringy = True
+                self.emit("movq %rax, %rdi")
+                self.emit("call print_string" if stringy else "call print_int")
+            return
+
+        if name == "Exists":
+            if len(call.arguments) != 1:
+                raise CodegenError("Exists expects (path)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("movq $0, %rsi")
+            self.emit("call access")
+            self.emit("cmpq $0, %rax")
+            self.emit("sete %al")
+            self.emit("movzbq %al, %rax")
+            return
+
+        if name == "CreateFolder":
+            if len(call.arguments) != 1:
+                raise CodegenError("CreateFolder expects (path)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("movq $493, %rsi")
+            self.emit("call mkdir")
+            return
+
+        if name == "Open":
+            if len(call.arguments) != 2:
+                raise CodegenError("Open expects (path, mode)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call fopen")
+            return
+
+        if name == "Close":
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call fclose")
+            return
+
+        if name == "Read":
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_read_all")
+            return
+
+        if name == "Write":
+            if len(call.arguments) != 2:
+                raise CodegenError("Write expects (file, data)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_write_all")
+            return
+
+        if name == "SHA256":
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_sha256")
+            return
+
+        if name == "GC":
+            self.emit("call vyl_collect")
+            return
+
+        if name == "ReadFilesize":
+            if len(call.arguments) != 1:
+                raise CodegenError("ReadFilesize expects (path)")
+            fail_lbl = self.get_label("rfs_fail")
+            done_lbl = self.get_label("rfs_done")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("leaq .mode_rb(%rip), %rsi")
+            self.emit("call fopen")
+            self.emit("movq %rax, %rbx")
+            self.emit(f"cmpq $0, %rbx")
+            self.emit(f"je {fail_lbl}")
+            self.emit("movq %rbx, %rdi")
+            self.emit("movq $0, %rsi")
+            self.emit("movq $2, %rdx")
+            self.emit("call fseek")
+            self.emit("movq %rbx, %rdi")
+            self.emit("call ftell")
+            self.emit("movq %rax, %r12")
+            self.emit("movq %rbx, %rdi")
+            self.emit("call rewind")
+            self.emit("movq %rbx, %rdi")
+            self.emit("call fclose")
+            self.emit("movq %r12, %rax")
+            self.emit(f"jmp {done_lbl}")
+            self.emit(f"{fail_lbl}:")
             self.emit("movq $0, %rax")
-    
+            self.emit(f"{done_lbl}:")
+            return
+
+        if name == "Argc":
+            self.emit("movq argc_store(%rip), %rax")
+            return
+
+        if name == "GetArg":
+            if len(call.arguments) == 1:
+                self.generate_expression(call.arguments[0])
+                self.emit("movq argv_store(%rip), %rbx")
+                self.emit("movq %rax, %rcx")
+                self.emit("movq (%rbx,%rcx,8), %rax")
+                return
+            if len(call.arguments) == 2:
+                self.generate_expression(call.arguments[1])
+                self.emit("movq %rax, %rcx")
+                self.generate_expression(call.arguments[0])
+                self.emit("movq %rax, %rbx")
+                self.emit("movq (%rbx,%rcx,8), %rax")
+                return
+            raise CodegenError("GetArg expects 1 or 2 arguments")
+
+        # generic call
+        for arg in reversed(call.arguments):
+            self.generate_expression(arg)
+            self.emit("push %rax")
+        self.emit(f"call {name}")
+        if call.arguments:
+            self.emit(f"addq ${len(call.arguments) * 8}, %rsp")
+
+    # ---------- control flow ----------
+    def generate_if(self, node: IfStmt):
+        else_lbl = self.get_label("else")
+        end_lbl = self.get_label("endif")
+        self.generate_expression(node.condition)
+        self.emit("cmpq $0, %rax")
+        self.emit(f"je {else_lbl}")
+        self.generate_statement(node.then_block)
+        self.emit(f"jmp {end_lbl}")
+        self.emit(f"{else_lbl}:")
+        if node.else_block:
+            self.generate_statement(node.else_block)
+        self.emit(f"{end_lbl}:")
+
+    def generate_while(self, node: WhileStmt):
+        start_lbl = self.get_label("while")
+        end_lbl = self.get_label("endwhile")
+        self.emit(f"{start_lbl}:")
+        self.generate_expression(node.condition)
+        self.emit("cmpq $0, %rax")
+        self.emit(f"je {end_lbl}")
+        self.generate_statement(node.body)
+        self.emit(f"jmp {start_lbl}")
+        self.emit(f"{end_lbl}:")
+
+    def generate_for(self, node: ForStmt):
+        start_lbl = self.get_label("for")
+        end_lbl = self.get_label("endfor")
+        loop_var = self.get_variable_symbol(node.var_name)
+        if not loop_var:
+            offset = len(self.locals) * 8 + 8
+            loop_var = Symbol(node.var_name, "int", False, -offset)
+            self.locals[node.var_name] = loop_var
+        self.generate_expression(node.start)
+        self.emit(f"movq %rax, {self.get_variable_location(loop_var)}")
+        self.emit(f"{start_lbl}:")
+        self.emit(f"movq {self.get_variable_location(loop_var)}, %rax")
+        self.emit("push %rax")
+        self.generate_expression(node.end)
+        self.emit("pop %rbx")
+        self.emit("cmpq %rax, %rbx")
+        self.emit(f"jg {end_lbl}")
+        self.generate_statement(node.body)
+        self.emit(f"incq {self.get_variable_location(loop_var)}")
+        self.emit(f"jmp {start_lbl}")
+        self.emit(f"{end_lbl}:")
+
+    # ---------- built-ins ----------
     def generate_builtin_functions(self):
-        """Generate built-in function implementations"""
-        # print_int function
+        # print_int
         self.emit(".globl print_int")
         self.emit("print_int:")
         self.emit("push %rbp")
@@ -494,8 +587,8 @@ class CodeGenerator:
         self.emit("call printf")
         self.emit("leave")
         self.emit("ret")
-        
-        # print_string function
+
+        # print_string
         self.emit(".globl print_string")
         self.emit("print_string:")
         self.emit("push %rbp")
@@ -506,39 +599,247 @@ class CodeGenerator:
         self.emit("call printf")
         self.emit("leave")
         self.emit("ret")
-        
-        # clock function - simple implementation that returns a timestamp
+
+        # clock (stubbed)
         self.emit(".globl clock")
         self.emit("clock:")
         self.emit("push %rbp")
         self.emit("movq %rsp, %rbp")
-        self.emit("movq $2208988800, %rax")  # Unix epoch in seconds (1970)
-        self.emit("addq clock_counter(%rip), %rax")  # Add counter for variation
-        self.emit("incq clock_counter(%rip)")  # Increment counter
+        self.emit("movq $2208988800, %rax")
+        self.emit("addq clock_counter(%rip), %rax")
+        self.emit("incq clock_counter(%rip)")
         self.emit("leave")
         self.emit("ret")
-        
-        # Clock counter for demonstration
+
         self.emit(".section .data")
         self.emit("clock_counter: .quad 1")
-        self.emit(".section .text")
-        
-        # Format strings
-        self.emit(".section .data")
         self.emit(".fmt_int: .asciz \"%ld\\n\"")
         self.emit(".fmt_string: .asciz \"%s\\n\"")
         self.emit(".fmt_newline: .asciz \"\\n\"")
+        self.emit("argc_store: .quad 0")
+        self.emit("argv_store: .quad 0")
+        self.emit(".mode_rb: .asciz \"rb\"")
+        self.emit("vyl_head: .quad 0")
+        self.emit("stack_base: .quad 0")
+        self.emit(".section .text")
+
+        # SHA256 helper
+        self.emit(".globl vyl_sha256")
+        self.emit("vyl_sha256:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("movq %rdi, %rbx")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call strlen")
+        self.emit("movq %rax, %r12")
+        self.emit("leaq sha256_buf(%rip), %rdi")
+        self.emit("movq %rdi, %rdx")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq %r12, %rsi")
+        self.emit("call SHA256")
+        self.emit("leaq sha256_buf(%rip), %rsi")
+        self.emit("leaq sha256_hex(%rip), %rdi")
+        self.emit("leaq hex_table(%rip), %r8")
+        self.emit("movq $0, %rcx")
+        self.emit("sha256_hex_loop:")
+        self.emit("cmpq $32, %rcx")
+        self.emit("jge sha256_hex_done")
+        self.emit("movzbl (%rsi,%rcx,1), %eax")
+        self.emit("movq %rax, %rbx")
+        self.emit("shrq $4, %rbx")
+        self.emit("andq $0xF, %rbx")
+        self.emit("movzbl (%r8,%rbx,1), %ebx")
+        self.emit("movb %bl, (%rdi,%rcx,2)")
+        self.emit("movzbl %al, %ebx")
+        self.emit("andq $0xF, %rbx")
+        self.emit("movzbl (%r8,%rbx,1), %ebx")
+        self.emit("movb %bl, 1(%rdi,%rcx,2)")
+        self.emit("incq %rcx")
+        self.emit("jmp sha256_hex_loop")
+        self.emit("sha256_hex_done:")
+        self.emit("movb $0, 64(%rdi)")
+        self.emit("leaq sha256_hex(%rip), %rax")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # read_all
+        self.emit(".globl vyl_read_all")
+        self.emit("vyl_read_all:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r13")
+        self.emit("push %r12")
+        self.emit("movq %rdi, %rbx")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq $0, %rsi")
+        self.emit("movq $2, %rdx")
+        self.emit("call fseek")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call ftell")
+        self.emit("movq %rax, %r12")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call rewind")
+        self.emit("cmpq $0, %r12")
+        self.emit("jle vyl_read_all_zero")
+        self.emit("movq %r12, %rdi")
+        self.emit("incq %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("movq %rax, %r13")
+        self.emit("movq %r13, %rdi")
+        self.emit("movq $1, %rsi")
+        self.emit("movq %r12, %rdx")
+        self.emit("movq %rbx, %rcx")
+        self.emit("call fread")
+        self.emit("movb $0, (%r13,%r12,1)")
+        self.emit("movq %r13, %rax")
+        self.emit("jmp vyl_read_all_done")
+        self.emit("vyl_read_all_zero:")
+        self.emit("movq $0, %rax")
+        self.emit("vyl_read_all_done:")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # write_all
+        self.emit(".globl vyl_write_all")
+        self.emit("vyl_write_all:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("movq %rdi, %rbx")
+        self.emit("movq %rsi, %r8")
+        self.emit("movq %r8, %rdi")
+        self.emit("call strlen")
+        self.emit("movq %rax, %rdx")
+        self.emit("movq %r8, %rdi")
+        self.emit("movq $1, %rsi")
+        self.emit("movq %rdx, %rdx")
+        self.emit("movq %rbx, %rcx")
+        self.emit("call fwrite")
+        self.emit("movq %rax, %rax")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_alloc (tracked malloc)
+        self.emit(".globl vyl_alloc")
+        self.emit("vyl_alloc:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("movq %rdi, %rbx")  # size
+        self.emit("addq $24, %rdi")
+        self.emit("call malloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_alloc_fail")
+        self.emit("movq vyl_head(%rip), %rcx")
+        self.emit("movq %rcx, (%rax)")      # next
+        self.emit("movq %rbx, 8(%rax)")      # size
+        self.emit("movq $0, 16(%rax)")       # mark
+        self.emit("movq %rax, vyl_head(%rip)")
+        self.emit("addq $24, %rax")          # return data ptr
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("vyl_alloc_fail:")
+        self.emit("movq $0, %rax")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_mark_ptr(rdi=ptr)
+        self.emit(".globl vyl_mark_ptr")
+        self.emit("vyl_mark_ptr:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("cmpq $0, %rdi")
+        self.emit("je vyl_mark_done")
+        self.emit("movq vyl_head(%rip), %rbx")
+        self.emit("vyl_mark_loop:")
+        self.emit("cmpq $0, %rbx")
+        self.emit("je vyl_mark_done")
+        self.emit("leaq 24(%rbx), %rax")
+        self.emit("cmpq %rax, %rdi")
+        self.emit("jb vyl_mark_next")
+        self.emit("movq 8(%rbx), %rcx")
+        self.emit("leaq (%rax,%rcx,1), %rdx")
+        self.emit("cmpq %rdi, %rdx")
+        self.emit("jae vyl_mark_next")
+        self.emit("movq $1, 16(%rbx)")
+        self.emit("jmp vyl_mark_done")
+        self.emit("vyl_mark_next:")
+        self.emit("movq (%rbx), %rbx")
+        self.emit("jmp vyl_mark_loop")
+        self.emit("vyl_mark_done:")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_collect (mark-sweep)
+        self.emit(".globl vyl_collect")
+        self.emit("vyl_collect:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        self.emit("movq stack_base(%rip), %r12")
+        self.emit("movq %rsp, %r13")
+        self.emit("vyl_mark_scan:")
+        self.emit("cmpq %r12, %r13")
+        self.emit("jae vyl_mark_done_scan")
+        self.emit("movq (%r13), %rdi")
+        self.emit("call vyl_mark_ptr")
+        self.emit("addq $8, %r13")
+        self.emit("jmp vyl_mark_scan")
+        self.emit("vyl_mark_done_scan:")
+        self.emit("movq vyl_head(%rip), %rbx")
+        self.emit("xor %rdi, %rdi")  # prev = 0
+        self.emit("vyl_sweep_loop:")
+        self.emit("cmpq $0, %rbx")
+        self.emit("je vyl_sweep_done")
+        self.emit("movq 16(%rbx), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("jne vyl_keep")
+        self.emit("movq (%rbx), %rcx")   # next
+        self.emit("cmpq $0, %rdi")
+        self.emit("je vyl_sweep_update_head")
+        self.emit("movq %rcx, (%rdi)")
+        self.emit("jmp vyl_sweep_free")
+        self.emit("vyl_sweep_update_head:")
+        self.emit("movq %rcx, vyl_head(%rip)")
+        self.emit("vyl_sweep_free:")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call free")
+        self.emit("movq %rcx, %rbx")
+        self.emit("jmp vyl_sweep_loop")
+        self.emit("vyl_keep:")
+        self.emit("movq $0, 16(%rbx)")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq (%rbx), %rbx")
+        self.emit("jmp vyl_sweep_loop")
+        self.emit("vyl_sweep_done:")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # data
+        self.emit(".section .data")
+        self.emit("sha256_buf: .space 32")
+        self.emit("sha256_hex: .space 65")
+        self.emit("hex_table: .asciz \"0123456789abcdef\"")
 
 
 def generate_assembly(program: Program) -> str:
-    """
-    Convenience function to generate assembly from AST
-    
-    Args:
-        program: The AST root node
-        
-    Returns:
-        Complete assembly code as a string
-    """
     generator = CodeGenerator()
     return generator.generate(program)

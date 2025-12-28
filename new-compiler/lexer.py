@@ -9,7 +9,7 @@ Token Types:
     Types: int, dec, string, bool
     Literals: INTEGER, DECIMAL, STRING, TRUE, FALSE
     Identifiers: variable/function names
-    Operators: +, -, *, /, =, ==, !=, <, >, <=, >=
+    Operators: +, -, *, /, =, ==, !=, <, >, <=, >=, &&, ||, .., ->
     Punctuation: (, ), {, }, [, ], ;, ,, ., :
     Special: NEWLINE, COMMENT, EOF
 """
@@ -48,12 +48,18 @@ KEYWORDS = {
     'import': 'IMPORT',
     'function': 'FUNCTION',
     'Function': 'FUNCTION',
+    'return': 'RETURN',
+    'Return': 'RETURN',
     'int': 'INT_TYPE',
     'dec': 'DEC_TYPE',
     'string': 'STRING_TYPE',
     'bool': 'BOOL_TYPE',
+    'inf': 'INF_TYPE',
+    'Inf': 'INF_TYPE',
     'true': 'TRUE',
     'false': 'FALSE',
+    'let': 'LET',
+    'mut': 'MUT',
 }
 
 
@@ -264,19 +270,21 @@ class Lexer:
             token_type = KEYWORDS.get(ident, 'IDENTIFIER')
             return Token(token_type, ident, line=line, column=column)
         
-        # Handle two-character operators
+        # Handle multi-character operators
         two_char = char + self.peek(1)
-        if two_char in ['==', '!=', '<=', '>=', '..']:
+        if two_char in ['==', '!=', '<=', '>=', '..', '&&', '||', '->']:
             self.advance(2)
-            if two_char == '==':
-                return Token('EQ', '==', line=line, column=column)
-            if two_char == '!=':
-                return Token('NE', '!=', line=line, column=column)
-            if two_char == '<=':
-                return Token('LE', '<=', line=line, column=column)
-            if two_char == '>=':
-                return Token('GE', '>=', line=line, column=column)
-            return Token(two_char, two_char, line=line, column=column)
+            table = {
+                '==': 'EQ',
+                '!=': 'NE',
+                '<=': 'LE',
+                '>=': 'GE',
+                '..': 'RANGE',
+                '&&': 'AND',
+                '||': 'OR',
+                '->': 'ARROW',
+            }
+            return Token(table[two_char], two_char, line=line, column=column)
         
         # Handle single-character tokens
         self.advance()
@@ -295,7 +303,11 @@ class Lexer:
         if char == '}': return Token('RBRACE', '}', line=line, column=column)
         if char == '[': return Token('LBRACKET', '[', line=line, column=column)
         if char == ']': return Token('RBRACKET', ']', line=line, column=column)
-        if char == ';': return Token('SEMICOLON', ';', line=line, column=column)
+        if char == ';':
+            # Treat the rest of the line as a comment after the semicolon
+            while self.position < self.length and self.peek() != '\n':
+                self.advance()
+            return Token('SEMICOLON', ';', line=line, column=column)
         if char == ',': return Token('COMMA', ',', line=line, column=column)
         if char == '.': return Token('DOT', '.', line=line, column=column)
         if char == ':': return Token('COLON', ':', line=line, column=column)

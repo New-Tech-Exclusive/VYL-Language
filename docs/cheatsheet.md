@@ -8,31 +8,44 @@ Not *Fully* up to date, This WILL change
 
 ## Types
 
-| Type | Keyword | Description | Example |
-| :--- | :--- | :--- | :--- |
-| **Integer** | `int` | 64-bit signed integer | `var int x = 10` |
-| **Decimal** | `dec` | 64-bit floating point | `var dec pi = 3.14` |
-| **String** | `string` | Null-terminated string | `var string s = "Hello"` |
-| **Boolean** | `bool` | True or false value | `var bool active = true` |
-| **Implicit** | (none) | Type inferred, defaults to `int` | `var count = 0` |
+| Type | Description | Example |
+| :--- | :--- | :--- |
+| **Integer** | 64-bit signed integer | `var int x = 10;` |
+| **Decimal** | 64-bit floating point | `var dec pi = 3.14;` |
+| **String** | Null-terminated string | `var string s = "Hello";` |
+| **Boolean** | True or false value | `var bool active = true;` |
+| **Struct** | User-defined data structure | `struct Point { var int x; }` |
+| **Implicit** | Type inferred from expression | `var count = 0;` |
 
 ## Variable Declarations
 
 ```vyl
-var <type> <name> = <expression>
+var [type] <name> = <expression>;
 ```
 Example:
 ```vyl
-var int score = 100
-var dec price = 19.99
-var string user = "Bentley"
+var int score = 100;
+var dec price = 19.99;
+var string user = "Bentley";
+var is_valid = true; // inferred as bool
+```
+
+## Structs
+
+```vyl
+struct <Name> {
+    var <type> <field>;
+    ...
+}
 ```
 
 ## Control Flow
 
-### If/Else
+### If/Else/Elif
 ```vyl
 if (condition) {
+    // code
+} elif (other_condition) {
     // code
 } else {
     // code
@@ -46,37 +59,55 @@ while (condition) {
 }
 ```
 
+### For Loop
+```vyl
+for i in 1..10 {
+    // code
+}
+```
+
+## Functions
+
+```vyl
+Function <name>(<params>) [-> <return_type>] {
+    // code
+    return <expression>;
+}
+```
+
 ## Built-in Functions
 
 | Function | Return Type | Description |
 | :--- | :--- | :--- |
 | `Print(val)` | `void` | Prints value to standard output. |
 | `Clock()` | `dec` | Returns current CPU time in seconds. |
+| `SHA256(s)` | `string` | Returns SHA256 hash of string. |
+| `Exists(p)` | `bool` | Returns true if path exists. |
+| `Read(p)`   | `string` | Reads file content. |
+| `Sys(cmd)` | `int` | Runs shell command. |
 
 ## Program Structure
 
-VYL programs start at `Main()`. Omit it and the compiler will fail validation.
+VYL programs start at `Function Main(argc, argv)`.
 
 ```vyl
-import stdio
-
-Main() {
-    Print("Live from VYL")
+Function Main(argc, argv) {
+    Print("Live from VYL");
     
-    var dec start = Clock()
+    var start = Clock();
     // Process...
-    var dec end = Clock()
+    var end = Clock();
     
-    Print("Elapsed: ")
-    Print(end - start)
+    Print("Elapsed: ");
+    Print(end - start);
 }
 ```
 
 ## Special Syntax
 
-- **Newlines**: Use `/n` inside strings for a literal newline character.
+- **Newlines**: Use `\n` inside strings for a literal newline character.
 - **Comments**: Use `//` for single-line comments.
-- **Semicolons**: Required after statements; omit them for blocks (`if/while/for` bodies).
+- **Semicolons**: Required after statements; omit for block headers.
 
 ## Optimization Tips
 - VYL uses **Peephole Optimization** for `i = i + 1` (converted to a single `inc` instruction).

@@ -1,15 +1,14 @@
-Main() {
-    var int[5] numbers
-    numbers[0] = 10
-    numbers[1] = 20
-    var res = numbers[0] + numbers[1]
-    Print("numbers[0] = ")
-    Print(numbers[0])
-    Print(/n)
-    Print("numbers[1] = ")
-    Print(numbers[1])
-    Print(/n)
-    Print("Sum = ")
-    Print(res)
-    Print(/n)
+Function Main() {
+    var a0 = 10;
+    var a1 = 20;
+    var res = a0 + a1;
+    Print("a0 = ");
+    Print(a0);
+    Print("\n");
+    Print("a1 = ");
+    Print(a1);
+    Print("\n");
+    Print("Sum = ");
+    Print(res);
+    Print("\n");
 }

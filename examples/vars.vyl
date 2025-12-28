@@ -1,18 +1,20 @@
-Print("Testing Typed Variables:");
+Function Main() {
+	Print("Testing Typed Variables:");
 
-var int a = 5;
-Print("int a is: ");
-Print(a);
+	var int a = 5;
+	Print("int a is: ");
+	Print(a);
 
-var string name = "Vyl-lang";
-Print("string name is: ");
-Print(name);
+	var string name = "Vyl-lang";
+	Print("string name is: ");
+	Print(name);
 
-var int b = a + 10;
-Print("b = a + 10 is: ");
-Print(b);
+	var int b = a + 10;
+	Print("b = a + 10 is: ");
+	Print(b);
 
-var dec pi = 3.14;
-Print("dec pi is: ");
-Print(pi);
-Print("Pi is roughly 3");
+	var dec pi = 3.14;
+	Print("dec pi is: ");
+	Print(pi);
+	Print("Pi is roughly 3");
+}

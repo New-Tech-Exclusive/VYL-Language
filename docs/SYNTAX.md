@@ -9,19 +9,28 @@
 
 ### Variables
 ```vyl
-var x = 10;                   // Integer
-var price = 19.99;            // Decimal
-var name = "John";            // String
-var isActive = true;          // Boolean
+var x = 10;                 // Integer (inferred)
+var int count = 5;          // Explicitly typed integer
+var dec price = 19.99;      // Decimal
+var string name = "John";   // String
+var bool isActive = true;   // Boolean
 ```
 
-Semicolons are required after statements except for control-flow block headers.
+Semicolons are required at the end of statements. Control-flow headers and block openings (e.g., `if (...) {`, `while (...) {`, `for ... {`, `Function MyFunction() {`, `struct MyStruct {`) do not end with semicolons.
 
 ### Types
-- `int` - Integer numbers
-- `dec` - Decimal numbers
-- `string` - String literals
-- `bool` - Boolean values (true/false)
+- Primitive kinds: `int`, `dec`, `string`, `bool`.
+- Variable declarations use `var` with optional type annotation.
+- Structs allow grouping data.
+
+### Structs
+```vyl
+struct Point {
+    var int x;
+    var int y;
+}
+```
+Structs are currently used for data organization and are handled by the parser and validator.
 
 ## Operators
 
@@ -47,6 +56,8 @@ if (condition) {
     // Code to execute if true
 } else {
     // Code to execute if false
+} elif {
+    // Code to exectute if false, then check if something else is true
 }
 ```
 
@@ -65,29 +76,31 @@ for i in 1..5 {
 }
 ```
 
-**Note:** Control flow statements (if, while, for) do not require semicolons after the closing brace, but statements inside the blocks do.
+**Note:** Control-flow blocks use braces. Statements inside blocks must end with semicolons.
 
 ## Functions
 
 ### Function Definition
 ```vyl
-MyFunction() {
-    // Function body
+Function MyFunction(a: int, b: int) -> int {
+    return a + b;
 }
 ```
+Functions can have typed parameters and return types.
 
 ### Function Call
 ```vyl
-MyFunction();
+var result = MyFunction(10, 20);
 ```
 
 ### Main Function
-Every VYL program needs a Main function as the entry point (validated before codegen):
+Every VYL program needs a `Main` function as the entry point:
 ```vyl
-Main() {
+Function Main(argc, argv) {
     // Program starts here
 }
 ```
+`Main` can optionally take `argc` and `argv`.
 
 ## Built-in Functions
 
@@ -96,28 +109,21 @@ Prints values to stdout:
 ```vyl
 Print("Hello, World!");
 Print(42);
+var x = 10;
 Print(x);
 ```
 
-### Clock
-Placeholder for timing functions:
-```vyl
-var time = Clock();
-```
-
-## Expression Examples
-
-### Arithmetic Expressions
-```vyl
-var result = (10 + 5) * 2 - 3;
-```
-
-### Comparison Expressions
-```vyl
-if (x > 5) {
-    Print("x is greater than 5");
-}
-```
+### File and System
+- `Exists(path: string) -> bool`: Check if file exists.
+- `CreateFolder(path: string) -> int`: Create a directory.
+- `Open(path: string, mode: string) -> int`: Open a file (returns file descriptor).
+- `Close(fd: int) -> int`: Close a file descriptor.
+- `Read(path: string) -> string`: Read entire file content.
+- `Write(fd: int, data: string) -> int`: Write string to file descriptor.
+- `SHA256(data: string) -> string`: Compute SHA256 hash.
+- `Sys(command: string) -> int`: Execute a system command.
+- `GetArg(index: int) -> string`: Get command line argument.
+- `Argc() -> int`: Get number of command line arguments.
 
 ### Complex Conditions
 ```vyl

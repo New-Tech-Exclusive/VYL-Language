@@ -10,7 +10,8 @@ AST Node Types:
     - VarDecl: Variable declarations
     - Assignment: Variable assignments
     - FunctionCall: Function calls (including Print and Clock)
-    - FunctionDef: Function definitions
+    - FunctionDef: Function definitions with parameters
+    - ReturnStmt: Return statements
     - Block: Code blocks ( {...} )
     - IfStmt: Conditional statements
     - WhileStmt: While loops
@@ -48,6 +49,7 @@ class VarDecl(ASTNode):
     name: str = ""
     var_type: Optional[str] = None  # 'int', 'dec', 'string', 'bool'
     value: Optional[ASTNode] = None
+    is_mutable: bool = True
 
 
 @dataclass
@@ -66,9 +68,24 @@ class FunctionCall(ASTNode):
 
 @dataclass
 class FunctionDef(ASTNode):
-    """Function definition: name() { ... }"""
+    """Function definition: name(params) [-> return_type] { ... }"""
     name: str = ""
+    params: List[tuple[str, Optional[str]]] = field(default_factory=list)
+    return_type: Optional[str] = None
     body: Optional['Block'] = None
+
+
+@dataclass
+class StructDef(ASTNode):
+    """Struct definition: struct Name { fields }"""
+    name: str = ""
+    fields: List['VarDecl'] = field(default_factory=list)
+
+
+@dataclass
+class ReturnStmt(ASTNode):
+    """Return statement: return [expr]"""
+    value: Optional[ASTNode] = None
 
 
 @dataclass
@@ -221,8 +238,14 @@ class Parser:
         stmt = None
         if token_type == 'VAR':
             stmt = self.parse_var_decl()
+        elif token_type == 'LET':
+            stmt = self.parse_let_decl()
         elif token_type == 'FUNCTION':
             stmt = self.parse_function_decl()
+        elif token_type == 'STRUCT':
+            stmt = self.parse_struct_decl()
+        elif token_type == 'RETURN':
+            stmt = self.parse_return()
         elif token_type == 'IDENTIFIER':
             stmt = self.parse_assignment_or_call()
         elif token_type == 'IF':
@@ -237,7 +260,7 @@ class Parser:
             )
         
         # Require semicolon after statement
-        if stmt and not isinstance(stmt, (IfStmt, WhileStmt, ForStmt, FunctionDef)):
+        if stmt and not isinstance(stmt, (IfStmt, WhileStmt, ForStmt, FunctionDef, Block, StructDef)):
             if not self.current_token or self.current_token.type != 'SEMICOLON':
                 raise SyntaxError(
                     f"Expected ';' after statement at line {stmt.line}"
@@ -247,66 +270,154 @@ class Parser:
         return stmt
 
     def parse_function_decl(self) -> FunctionDef:
-        """Parse: Function name() { ... }"""
+        """Parse: Function name(params) [-> type] { ... }"""
         fn_token = self.consume('FUNCTION')
         name_tok = self.consume('IDENTIFIER')
         self.consume('LPAREN')
-        # no parameters supported yet
+        params: List[tuple[str, Optional[str]]] = []
+        if self.current_token and self.current_token.type != 'RPAREN':
+            params.append(self.parse_param())
+            while self.current_token and self.current_token.type == 'COMMA':
+                self.consume('COMMA')
+                params.append(self.parse_param())
         self.consume('RPAREN')
+
+        return_type: Optional[str] = None
+        if self.current_token and self.current_token.type == 'ARROW':
+            self.consume('ARROW')
+            return_type = self.parse_type_annotation()
+
         body = self.parse_block()
-        return FunctionDef(name=name_tok.value, body=body, line=fn_token.line, column=fn_token.column)
+        return FunctionDef(name=name_tok.value, params=params, return_type=return_type, body=body, line=fn_token.line, column=fn_token.column)
+
+    def parse_param(self) -> tuple[str, Optional[str]]:
+        name_tok = self.consume('IDENTIFIER')
+        param_type: Optional[str] = None
+        if self.current_token and self.current_token.type == 'COLON':
+            self.consume('COLON')
+            param_type = self.parse_type_annotation()
+        return (name_tok.value, param_type)
+
+    def parse_struct_decl(self) -> StructDef:
+        """Parse: struct Name { fields }"""
+        struct_tok = self.consume('STRUCT')
+        name_tok = self.consume('IDENTIFIER')
+        self.consume('LBRACE')
+        self.skip_newlines()
+
+        fields: List[VarDecl] = []
+        while self.current_token and self.current_token.type != 'RBRACE':
+            if self.current_token.type != 'VAR':
+                raise SyntaxError(
+                    f"Expected field declaration in struct at line {self.current_token.line}"
+                )
+
+            # Parse a field: var <type-or-identifier> <name>;
+            self.consume('VAR')
+            field_type = None
+            if self.current_token and self.current_token.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE']:
+                field_type = self.current_token.value
+                self.advance()
+            elif self.current_token and self.current_token.type == 'IDENTIFIER':
+                field_type = self.current_token.value
+                self.advance()
+
+            name_tok = self.consume('IDENTIFIER')
+            field_decl = VarDecl(name=name_tok.value, var_type=field_type, value=None, is_mutable=True,
+                                 line=name_tok.line, column=name_tok.column)
+
+            if not self.current_token or self.current_token.type != 'SEMICOLON':
+                raise SyntaxError(
+                    f"Expected ';' after field in struct at line {field_decl.line}"
+                )
+            self.consume('SEMICOLON')
+            fields.append(field_decl)
+            self.skip_newlines()
+
+        self.consume('RBRACE')
+        return StructDef(name=name_tok.value, fields=fields, line=struct_tok.line, column=struct_tok.column)
+
+    def parse_type_annotation(self) -> str:
+        if not self.current_token:
+            raise SyntaxError("Expected type annotation")
+        tok = self.current_token
+        if tok.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE']:
+            self.advance()
+            return tok.value
+        raise SyntaxError(f"Expected type, got {tok.type}")
+
+    def parse_return(self) -> ReturnStmt:
+        """Parse: return [expr]"""
+        tok = self.consume('RETURN')
+        if self.current_token and self.current_token.type not in ('SEMICOLON', 'NEWLINE', 'RBRACE'):
+            value = self.parse_expression()
+        else:
+            value = None
+        return ReturnStmt(value=value, line=tok.line, column=tok.column)
     
     def parse_var_decl(self) -> VarDecl:
-        """Parse: var [type] name [= value]"""
+        """Parse: var [type] name [= value] (mutable by default)"""
         self.consume('VAR')
 
-        # Optional type annotation
         var_type = None
-        if self.current_token and self.current_token.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE']:
+        if self.current_token and self.current_token.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE']:
             var_type = self.current_token.value
             self.advance()
 
-        # Get variable name
         name_token = self.consume('IDENTIFIER')
         name = name_token.value
 
-        # Optional initialization
         value = None
         if self.current_token and self.current_token.type == 'ASSIGN':
             self.consume('ASSIGN')
             value = self.parse_expression()
 
-        return VarDecl(name=name, var_type=var_type, value=value, 
+        return VarDecl(name=name, var_type=var_type, value=value, is_mutable=True,
+                      line=name_token.line, column=name_token.column)
+
+    def parse_let_decl(self) -> VarDecl:
+        """Parse: let [mut] name [: type] [= value] (immutable by default)"""
+        self.consume('LET')
+        is_mutable = False
+        if self.current_token and self.current_token.type == 'MUT':
+            self.consume('MUT')
+            is_mutable = True
+
+        name_token = self.consume('IDENTIFIER')
+        name = name_token.value
+
+        var_type = None
+        if self.current_token and self.current_token.type == 'COLON':
+            self.consume('COLON')
+            var_type = self.parse_type_annotation()
+
+        value = None
+        if self.current_token and self.current_token.type == 'ASSIGN':
+            self.consume('ASSIGN')
+            value = self.parse_expression()
+
+        return VarDecl(name=name, var_type=var_type, value=value, is_mutable=is_mutable,
                       line=name_token.line, column=name_token.column)
     
     def parse_assignment_or_call(self) -> ASTNode:
-        """Parse assignment or function call"""
+        """Parse assignment or function call (no implicit definitions)."""
         name_token = self.consume('IDENTIFIER')
         name = name_token.value
-        
-        # Check if it's a function call
+
         if self.current_token and self.current_token.type == 'LPAREN':
             self.consume('LPAREN')
             arguments = []
-            
+
             if self.current_token and self.current_token.type != 'RPAREN':
                 arguments.append(self.parse_expression())
                 while self.current_token and self.current_token.type == 'COMMA':
                     self.consume('COMMA')
                     arguments.append(self.parse_expression())
-            
+
             self.consume('RPAREN')
-            
-            # Check if this is actually a function definition
-            if self.current_token and self.current_token.type == 'LBRACE':
-                body = self.parse_block()
-                return FunctionDef(name=name, body=body, 
-                                 line=name_token.line, column=name_token.column)
-            
             return FunctionCall(name=name, arguments=arguments,
                               line=name_token.line, column=name_token.column)
-        
-        # Otherwise it's an assignment
+
         self.consume('ASSIGN')
         value = self.parse_expression()
         return Assignment(name=name, value=value,
@@ -375,15 +486,8 @@ class Parser:
         var_name = self.consume('IDENTIFIER').value
         self.consume('IN')
         start = self.parse_expression()
-        # Handle both '..' and separate DOT tokens
-        if self.current_token and self.current_token.type == 'DOT':
-            self.consume('DOT')
-            if self.current_token and self.current_token.type == 'DOT':
-                self.consume('DOT')
-            else:
-                raise SyntaxError("Expected '..' in for loop range")
-        elif self.current_token and self.current_token.value == '..':
-            self.consume('..')  # This will work if we add '..' as a token type
+        if self.current_token and self.current_token.type == 'RANGE':
+            self.consume('RANGE')
         else:
             raise SyntaxError("Expected '..' in for loop range")
         
@@ -395,7 +499,27 @@ class Parser:
     
     def parse_expression(self) -> ASTNode:
         """Parse expression with operator precedence"""
-        return self.parse_comparison()
+        return self.parse_logical_or()
+
+    def parse_logical_or(self) -> ASTNode:
+        node = self.parse_logical_and()
+        while self.current_token and self.current_token.type == 'OR':
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_logical_and()
+            node = BinaryExpr(left=node, operator=op, right=right,
+                             line=node.line, column=node.column)
+        return node
+
+    def parse_logical_and(self) -> ASTNode:
+        node = self.parse_comparison()
+        while self.current_token and self.current_token.type == 'AND':
+            op = self.current_token.value
+            self.advance()
+            right = self.parse_comparison()
+            node = BinaryExpr(left=node, operator=op, right=right,
+                             line=node.line, column=node.column)
+        return node
     
     def parse_comparison(self) -> ASTNode:
         """Parse comparison operators"""

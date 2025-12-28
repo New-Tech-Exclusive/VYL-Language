@@ -1,0 +1,19 @@
+Function fib_iter(n: int) -> int {
+    if (n <= 1) {
+        return n;
+    }
+    var a = 0;
+    var b = 1;
+    var i = 2;
+    while (i <= n) {
+        var t = a + b;
+        a = b;
+        b = t;
+        i = i + 1;
+    }
+    return b;
+}
+
+Function Main() {
+    Print(fib_iter(100000000));
+}

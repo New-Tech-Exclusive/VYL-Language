@@ -29,6 +29,8 @@ from pathlib import Path
 try:
     from .lexer import tokenize
     from .parser import parse
+    from .resolver import resolve_program
+    from .type_checker import type_check
     from .validator import validate_program, ValidationError
     from .codegen import generate_assembly, CodegenError
 except ImportError:
@@ -38,6 +40,8 @@ except ImportError:
         sys.path.append(os.path.dirname(os.path.abspath(__file__)))
         from lexer import tokenize
         from parser import parse
+        from resolver import resolve_program
+        from type_checker import type_check
         from validator import validate_program, ValidationError
         from codegen import generate_assembly, CodegenError
     else:
@@ -113,8 +117,18 @@ def compile_vyl(source_code: str, output_file: str, generate_assembly_only: bool
         ast = parse(tokens)
         print("  AST generated successfully")
         
-        # Step 2.5: Semantic validation
-        print("Step 2.5: Validating AST...")
+        # Step 2.5: Resolve symbols / basic semantics
+        print("Step 2a: Resolving symbols...")
+        resolve_program(ast)
+        print("  Resolution passed")
+
+        # Step 2.6: Type checking
+        print("Step 2b: Type checking...")
+        type_check(ast)
+        print("  Type checking passed")
+
+        # Step 2.7: Additional validation (legacy checks)
+        print("Step 2c: Validating AST...")
         validate_program(ast)
         print("  Validation passed")
 
@@ -280,7 +294,8 @@ Examples:
         if args.assembly:
             output_file = base_name + ".s"
         else:
-            output_file = base_name
+            # Default compiled output uses .vylo extension when no explicit output is given.
+            output_file = base_name + ".vylo"
     
     # Target selection
     target = 'elf'

@@ -1,6 +1,6 @@
-include "math_lib.vyl"
+include "math_lib.vyl";
 
-Main() {
+Function Main() {
     var x = 15;
     var res = Square(x);
     Print("Square of 15 is: ");

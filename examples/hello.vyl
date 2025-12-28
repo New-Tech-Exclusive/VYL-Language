@@ -1,9 +1,3 @@
-import stdio
-
-// In theory, you can also do the Python method of just Print("Hello, World!")
-// but I'm not sure if that still works at the time of writing this comment, last time I checked though, it did.
-// Note: in VYL, you can end lines with a semicolon if you want to, but it's not required. Semicolons only add in a small, fractional amount of performance.
-
-Main() {
+Function Main() {
     Print("Hello, World!");
 }

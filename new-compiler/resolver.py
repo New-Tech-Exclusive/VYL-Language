@@ -1,14 +1,6 @@
 """
-VYL AST Validator - performs lightweight semantic checks before code generation.
-
-The validator ensures:
-- No duplicate global variables or function names
-- Assignments target declared globals when outside functions
-- Identifiers reference declared symbols
-- Function calls reference declared or built-in functions
-- A user-defined Main function exists (the code generator always calls it)
-
-The goal is to fail fast with clear diagnostics before code generation.
+Resolver pass: builds symbol tables and enforces declaration-before-use.
+This is a syntax-level semantic check (no types yet).
 """
 from typing import Dict, Set
 try:
@@ -29,7 +21,8 @@ try:
         Identifier,
         StructDef,
     )
-except ImportError:
+    from .validator import ValidationError
+except ImportError:  # pragma: no cover - fallback for direct execution
     from parser import (  # type: ignore
         Program,
         VarDecl,
@@ -47,6 +40,7 @@ except ImportError:
         Identifier,
         StructDef,
     )
+    from validator import ValidationError  # type: ignore
 
 BUILTIN_FUNCTIONS: Set[str] = {
     "Print",
@@ -65,58 +59,42 @@ BUILTIN_FUNCTIONS: Set[str] = {
     "Sys",
     "Input",
 }
-class ValidationError(Exception):
-    """Semantic validation failure with location metadata."""
-
-    def __init__(self, message: str, line: int = 0, column: int = 0):
-        super().__init__(message)
-        self.line = line
-        self.column = column
-
-    def __str__(self) -> str:
-        location = ""
-        if self.line:
-            location = f" (line {self.line}, col {self.column})"
-        return f"{self.args[0]}{location}"
 
 
-def validate_program(program: Program) -> None:
-    """Validate the AST, raising ValidationError on the first problem."""
+def resolve_program(program: Program) -> tuple[Dict[str, tuple[str, bool]], Dict[str, FunctionDef]]:
     globals_table: Dict[str, tuple[str, bool]] = {}
     functions: Dict[str, FunctionDef] = {}
 
-    # First pass: globals and functions
     for stmt in program.statements:
         if isinstance(stmt, VarDecl):
             _register_global(stmt, globals_table)
         elif isinstance(stmt, FunctionDef):
             _register_function(stmt, functions)
         elif isinstance(stmt, StructDef):
-            # Struct definitions are accepted but not yet validated semantically
             pass
 
-    # Ensure Main entrypoint exists
     if "Main" not in functions:
         raise ValidationError("Missing Main function entrypoint", program.line, program.column)
 
-    # Second pass: validate statements
     for stmt in program.statements:
         if isinstance(stmt, FunctionDef):
-            _validate_function(stmt, globals_table, functions)
+            _resolve_function(stmt, globals_table, functions)
         elif isinstance(stmt, VarDecl):
-            # Validate initializer, if any, in global scope
             if stmt.value:
-                _validate_expression(stmt.value, globals_table, {}, functions)
+                _resolve_expression(stmt.value, globals_table, {}, functions)
         elif isinstance(stmt, StructDef):
             continue
         else:
-            _validate_statement(stmt, globals_table, {}, functions, in_function=False)
+            _resolve_statement(stmt, globals_table, {}, functions, in_function=False)
+
+    return globals_table, functions
 
 
 def _register_global(decl: VarDecl, globals_table: Dict[str, tuple[str, bool]]) -> None:
     if decl.name in globals_table:
         raise ValidationError(f"Duplicate global variable '{decl.name}'", decl.line, decl.column)
-    globals_table[decl.name] = (decl.var_type or "int", decl.is_mutable)
+    inferred = decl.var_type or "int"
+    globals_table[decl.name] = (inferred, decl.is_mutable)
 
 
 def _register_function(func: FunctionDef, functions: Dict[str, FunctionDef]) -> None:
@@ -125,90 +103,83 @@ def _register_function(func: FunctionDef, functions: Dict[str, FunctionDef]) -> 
     functions[func.name] = func
 
 
-def _validate_function(func: FunctionDef, globals_table: Dict[str, tuple[str, bool]], functions: Dict[str, FunctionDef]) -> None:
+def _resolve_function(func: FunctionDef, globals_table: Dict[str, tuple[str, bool]], functions: Dict[str, FunctionDef]) -> None:
     locals_table: Dict[str, tuple[str, bool]] = {}
-
-    # Register parameters as locals (mutable by default for now)
     for pname, ptype in func.params:
         if pname in locals_table:
             raise ValidationError(f"Duplicate parameter '{pname}'", func.line, func.column)
         locals_table[pname] = (ptype or "int", True)
 
-    # Validate the body statements
     for stmt in func.body.statements if func.body else []:
-        _validate_statement(stmt, globals_table, locals_table, functions, in_function=True)
+        _resolve_statement(stmt, globals_table, locals_table, functions, in_function=True)
 
 
-def _validate_statement(stmt, globals_table: Dict[str, tuple[str, bool]], locals_table: Dict[str, tuple[str, bool]], functions: Dict[str, FunctionDef], in_function: bool) -> None:
+def _resolve_statement(stmt, globals_table: Dict[str, tuple[str, bool]], locals_table: Dict[str, tuple[str, bool]], functions: Dict[str, FunctionDef], in_function: bool) -> None:
     if isinstance(stmt, VarDecl):
         if stmt.name in locals_table:
             raise ValidationError(f"Duplicate local variable '{stmt.name}'", stmt.line, stmt.column)
         locals_table[stmt.name] = (stmt.var_type or "int", stmt.is_mutable)
         if stmt.value:
-            _validate_expression(stmt.value, globals_table, locals_table, functions)
+            _resolve_expression(stmt.value, globals_table, locals_table, functions)
     elif isinstance(stmt, Assignment):
         if not in_function and stmt.name not in globals_table:
             raise ValidationError(f"Assignment to undefined global '{stmt.name}'", stmt.line, stmt.column)
         if in_function and stmt.name not in locals_table and stmt.name not in globals_table:
             raise ValidationError(f"Assignment to undefined identifier '{stmt.name}'", stmt.line, stmt.column)
-        _validate_expression(stmt.value, globals_table, locals_table, functions)
+        _resolve_expression(stmt.value, globals_table, locals_table, functions)
     elif isinstance(stmt, FunctionCall):
-        _validate_expression(stmt, globals_table, locals_table, functions)
+        _resolve_expression(stmt, globals_table, locals_table, functions)
     elif isinstance(stmt, IfStmt):
-        _validate_expression(stmt.condition, globals_table, locals_table, functions)
-        _validate_statement(stmt.then_block, globals_table, dict(locals_table), functions, in_function)
+        _resolve_expression(stmt.condition, globals_table, locals_table, functions)
+        _resolve_statement(stmt.then_block, globals_table, dict(locals_table), functions, in_function)
         if stmt.else_block:
-            _validate_statement(stmt.else_block, globals_table, dict(locals_table), functions, in_function)
+            _resolve_statement(stmt.else_block, globals_table, dict(locals_table), functions, in_function)
     elif isinstance(stmt, WhileStmt):
-        _validate_expression(stmt.condition, globals_table, locals_table, functions)
-        _validate_statement(stmt.body, globals_table, dict(locals_table), functions, in_function)
+        _resolve_expression(stmt.condition, globals_table, locals_table, functions)
+        _resolve_statement(stmt.body, globals_table, dict(locals_table), functions, in_function)
     elif isinstance(stmt, ForStmt):
-        _validate_expression(stmt.start, globals_table, locals_table, functions)
-        _validate_expression(stmt.end, globals_table, locals_table, functions)
+        _resolve_expression(stmt.start, globals_table, locals_table, functions)
+        _resolve_expression(stmt.end, globals_table, locals_table, functions)
         loop_locals = dict(locals_table)
         loop_locals[stmt.var_name] = ("int", True)
-        _validate_statement(stmt.body, globals_table, loop_locals, functions, in_function)
+        _resolve_statement(stmt.body, globals_table, loop_locals, functions, in_function)
     elif isinstance(stmt, Block):
         scope_locals = dict(locals_table)
         for inner in stmt.statements:
-            _validate_statement(inner, globals_table, scope_locals, functions, in_function)
+            _resolve_statement(inner, globals_table, scope_locals, functions, in_function)
     elif isinstance(stmt, ReturnStmt):
         if not in_function:
             raise ValidationError("Return outside of function", stmt.line, stmt.column)
         if stmt.value:
-            _validate_expression(stmt.value, globals_table, locals_table, functions)
+            _resolve_expression(stmt.value, globals_table, locals_table, functions)
     elif isinstance(stmt, StructDef):
         return
-    # Other node types (e.g., expressions used as statements) fall through
     else:
         if hasattr(stmt, "condition") or hasattr(stmt, "body"):
-            return  # Already handled structured nodes
-        # Treat bare expressions conservatively
-        _validate_expression(stmt, globals_table, locals_table, functions)
+            return
+        _resolve_expression(stmt, globals_table, locals_table, functions)
 
 
-def _validate_expression(expr, globals_table: Dict[str, tuple[str, bool]], locals_table: Dict[str, tuple[str, bool]], functions: Dict[str, FunctionDef]) -> None:
+def _resolve_expression(expr, globals_table: Dict[str, tuple[str, bool]], locals_table: Dict[str, tuple[str, bool]], functions: Dict[str, FunctionDef]) -> None:
     if isinstance(expr, Identifier):
         if expr.name in ("argc", "argv"):
             return
         if expr.name not in locals_table and expr.name not in globals_table:
             raise ValidationError(f"Undefined identifier '{expr.name}'", expr.line, expr.column)
     elif isinstance(expr, BinaryExpr):
-        _validate_expression(expr.left, globals_table, locals_table, functions)
-        _validate_expression(expr.right, globals_table, locals_table, functions)
+        _resolve_expression(expr.left, globals_table, locals_table, functions)
+        _resolve_expression(expr.right, globals_table, locals_table, functions)
     elif isinstance(expr, UnaryExpr):
-        _validate_expression(expr.operand, globals_table, locals_table, functions)
+        _resolve_expression(expr.operand, globals_table, locals_table, functions)
     elif isinstance(expr, FunctionCall):
         if expr.name not in BUILTIN_FUNCTIONS and expr.name not in functions:
             raise ValidationError(f"Unknown function '{expr.name}'", expr.line, expr.column)
         for arg in expr.arguments:
-            _validate_expression(arg, globals_table, locals_table, functions)
-    elif isinstance(expr, (Literal,)):  # Literals are always valid
+            _resolve_expression(arg, globals_table, locals_table, functions)
+    elif isinstance(expr, (Literal,)):
         return
     elif isinstance(expr, Block):
-        # Validate nested block expressions if ever used
         for inner in expr.statements:
-            _validate_statement(inner, globals_table, dict(locals_table), functions, in_function=True)
+            _resolve_statement(inner, globals_table, dict(locals_table), functions, in_function=True)
     else:
-        # Catch-all to avoid silent acceptance of future node types
         raise ValidationError("Unsupported expression encountered", expr.line if hasattr(expr, "line") else 0, getattr(expr, "column", 0))

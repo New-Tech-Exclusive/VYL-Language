@@ -28,6 +28,7 @@ try:
         Literal,
         Identifier,
         StructDef,
+        FieldAccess,
     )
 except ImportError:
     from parser import (  # type: ignore
@@ -46,6 +47,7 @@ except ImportError:
         Literal,
         Identifier,
         StructDef,
+        FieldAccess,
     )
 
 BUILTIN_FUNCTIONS: Set[str] = {
@@ -64,6 +66,35 @@ BUILTIN_FUNCTIONS: Set[str] = {
     "GC",
     "Sys",
     "Input",
+    "Exit",
+    "Sleep",
+    "Now",
+    "RandInt",
+    "Remove",
+    "TcpConnect",
+    "TcpSend",
+    "TcpRecv",
+    "TcpClose",
+    "TcpResolve",
+    "TlsConnect",
+    "TlsSend",
+    "TlsRecv",
+    "TlsClose",
+    "HttpGet",
+    "HttpDownload",
+    "Array",
+    "Length",
+    "Sqrt",
+    "MkdirP",
+    "RemoveAll",
+    "CopyFile",
+    "Unzip",
+    "StrConcat",
+    "StrLen",
+    "StrFind",
+    "Substring",
+    "GetEnv",
+    "Sys",
 }
 class ValidationError(Exception):
     """Semantic validation failure with location metadata."""
@@ -85,6 +116,42 @@ def validate_program(program: Program) -> None:
     globals_table: Dict[str, tuple[str, bool]] = {}
     functions: Dict[str, FunctionDef] = {}
 
+    # Collect global identifier usage for warnings later
+    global_refs: Set[str] = set()
+    def _collect_identifiers(node) -> None:
+        if isinstance(node, Identifier):
+            global_refs.add(node.name)
+        elif isinstance(node, FunctionCall):
+            for arg in node.arguments:
+                _collect_identifiers(arg)
+        elif isinstance(node, BinaryExpr):
+            _collect_identifiers(node.left)
+            _collect_identifiers(node.right)
+        elif isinstance(node, UnaryExpr):
+            _collect_identifiers(node.operand)
+        elif isinstance(node, (VarDecl, Assignment, ReturnStmt)) and getattr(node, 'value', None):
+            _collect_identifiers(node.value)
+        elif isinstance(node, IfStmt):
+            _collect_identifiers(node.condition)
+            for inner in (node.then_block.statements if node.then_block else []):
+                _collect_identifiers(inner)
+            if node.else_block:
+                for inner in (node.else_block.statements if hasattr(node.else_block, 'statements') else []):
+                    _collect_identifiers(inner)
+        elif isinstance(node, WhileStmt):
+            _collect_identifiers(node.condition)
+            for inner in (node.body.statements if node.body else []):
+                _collect_identifiers(inner)
+        elif isinstance(node, ForStmt):
+            _collect_identifiers(node.start)
+            _collect_identifiers(node.end)
+            for inner in (node.body.statements if node.body else []):
+                _collect_identifiers(inner)
+        elif isinstance(node, Block):
+            for inner in node.statements:
+                _collect_identifiers(inner)
+
+
     # First pass: globals and functions
     for stmt in program.statements:
         if isinstance(stmt, VarDecl):
@@ -94,6 +161,7 @@ def validate_program(program: Program) -> None:
         elif isinstance(stmt, StructDef):
             # Struct definitions are accepted but not yet validated semantically
             pass
+        _collect_identifiers(stmt)
 
     # Ensure Main entrypoint exists
     if "Main" not in functions:
@@ -112,6 +180,11 @@ def validate_program(program: Program) -> None:
         else:
             _validate_statement(stmt, globals_table, {}, functions, in_function=False)
 
+    # Warnings: unused globals
+    for gname, (gtype, _) in globals_table.items():
+        if gname not in global_refs:
+            print(f"Warning: unused global '{gname}'")
+
 
 def _register_global(decl: VarDecl, globals_table: Dict[str, tuple[str, bool]]) -> None:
     if decl.name in globals_table:
@@ -127,6 +200,7 @@ def _register_function(func: FunctionDef, functions: Dict[str, FunctionDef]) -> 
 
 def _validate_function(func: FunctionDef, globals_table: Dict[str, tuple[str, bool]], functions: Dict[str, FunctionDef]) -> None:
     locals_table: Dict[str, tuple[str, bool]] = {}
+    local_refs: Set[str] = set()
 
     # Register parameters as locals (mutable by default for now)
     for pname, ptype in func.params:
@@ -137,6 +211,49 @@ def _validate_function(func: FunctionDef, globals_table: Dict[str, tuple[str, bo
     # Validate the body statements
     for stmt in func.body.statements if func.body else []:
         _validate_statement(stmt, globals_table, locals_table, functions, in_function=True)
+        _collect_locals_refs(stmt, local_refs)
+
+    # Warnings: unused locals/params
+    for lname in locals_table.keys():
+        if lname not in local_refs:
+            print(f"Warning: unused local '{lname}' in function {func.name}")
+
+
+def _collect_locals_refs(node, refs: Set[str]) -> None:
+    if isinstance(node, Identifier):
+        refs.add(node.name)
+    elif isinstance(node, FunctionCall):
+        for arg in node.arguments:
+            _collect_locals_refs(arg, refs)
+    elif isinstance(node, BinaryExpr):
+        _collect_locals_refs(node.left, refs)
+        _collect_locals_refs(node.right, refs)
+    elif isinstance(node, UnaryExpr):
+        _collect_locals_refs(node.operand, refs)
+    elif hasattr(node, "receiver") and hasattr(node, "index"):
+        _collect_locals_refs(node.receiver, refs)
+        _collect_locals_refs(node.index, refs)
+    elif isinstance(node, (VarDecl, Assignment, ReturnStmt)) and getattr(node, 'value', None):
+        _collect_locals_refs(node.value, refs)
+    elif isinstance(node, IfStmt):
+        _collect_locals_refs(node.condition, refs)
+        for inner in (node.then_block.statements if node.then_block else []):
+            _collect_locals_refs(inner, refs)
+        if node.else_block:
+            for inner in (node.else_block.statements if hasattr(node.else_block, 'statements') else []):
+                _collect_locals_refs(inner, refs)
+    elif isinstance(node, WhileStmt):
+        _collect_locals_refs(node.condition, refs)
+        for inner in (node.body.statements if node.body else []):
+            _collect_locals_refs(inner, refs)
+    elif isinstance(node, ForStmt):
+        _collect_locals_refs(node.start, refs)
+        _collect_locals_refs(node.end, refs)
+        for inner in (node.body.statements if node.body else []):
+            _collect_locals_refs(inner, refs)
+    elif isinstance(node, Block):
+        for inner in node.statements:
+            _collect_locals_refs(inner, refs)
 
 
 def _validate_statement(stmt, globals_table: Dict[str, tuple[str, bool]], locals_table: Dict[str, tuple[str, bool]], functions: Dict[str, FunctionDef], in_function: bool) -> None:
@@ -147,10 +264,13 @@ def _validate_statement(stmt, globals_table: Dict[str, tuple[str, bool]], locals
         if stmt.value:
             _validate_expression(stmt.value, globals_table, locals_table, functions)
     elif isinstance(stmt, Assignment):
-        if not in_function and stmt.name not in globals_table:
-            raise ValidationError(f"Assignment to undefined global '{stmt.name}'", stmt.line, stmt.column)
-        if in_function and stmt.name not in locals_table and stmt.name not in globals_table:
-            raise ValidationError(f"Assignment to undefined identifier '{stmt.name}'", stmt.line, stmt.column)
+        if stmt.target:
+            _validate_expression(stmt.target, globals_table, locals_table, functions)
+        else:
+            if not in_function and stmt.name not in globals_table:
+                raise ValidationError(f"Assignment to undefined global '{stmt.name}'", stmt.line, stmt.column)
+            if in_function and stmt.name not in locals_table and stmt.name not in globals_table:
+                raise ValidationError(f"Assignment to undefined identifier '{stmt.name}'", stmt.line, stmt.column)
         _validate_expression(stmt.value, globals_table, locals_table, functions)
     elif isinstance(stmt, FunctionCall):
         _validate_expression(stmt, globals_table, locals_table, functions)
@@ -170,8 +290,13 @@ def _validate_statement(stmt, globals_table: Dict[str, tuple[str, bool]], locals
         _validate_statement(stmt.body, globals_table, loop_locals, functions, in_function)
     elif isinstance(stmt, Block):
         scope_locals = dict(locals_table)
+        saw_return = False
         for inner in stmt.statements:
+            if saw_return:
+                print(f"Warning: unreachable code after return at line {inner.line if hasattr(inner, 'line') else 0}")
             _validate_statement(inner, globals_table, scope_locals, functions, in_function)
+            if isinstance(inner, ReturnStmt):
+                saw_return = True
     elif isinstance(stmt, ReturnStmt):
         if not in_function:
             raise ValidationError("Return outside of function", stmt.line, stmt.column)
@@ -203,6 +328,11 @@ def _validate_expression(expr, globals_table: Dict[str, tuple[str, bool]], local
             raise ValidationError(f"Unknown function '{expr.name}'", expr.line, expr.column)
         for arg in expr.arguments:
             _validate_expression(arg, globals_table, locals_table, functions)
+    elif isinstance(expr, FieldAccess):
+        _validate_expression(expr.receiver, globals_table, locals_table, functions)
+    elif hasattr(expr, "receiver") and hasattr(expr, "index"):
+        _validate_expression(expr.receiver, globals_table, locals_table, functions)
+        _validate_expression(expr.index, globals_table, locals_table, functions)
     elif isinstance(expr, (Literal,)):  # Literals are always valid
         return
     elif isinstance(expr, Block):

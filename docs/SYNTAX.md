@@ -21,7 +21,8 @@ Semicolons are required at the end of statements. Control-flow headers and block
 ### Types
 - Primitive kinds: `int`, `dec`, `string`, `bool`.
 - Variable declarations use `var` with optional type annotation.
-- Structs allow grouping data.
+- Structs are declarations only for now (no generated layout or field access).
+- Arrays are heap-allocated int arrays via `Array(len)`; index with `arr[i]` and get length with `Length(arr)`. Indexing is null/bounds-checked and aborts on violation.
 
 ### Structs
 ```vyl
@@ -50,14 +51,14 @@ Structs are currently used for data organization and are handled by the parser a
 
 ## Control Flow
 
-### If/Else Statement
+### If/Else/Elif Statement
 ```vyl
 if (condition) {
     // Code to execute if true
+} elif (other_condition) {
+    // Checked if the first condition was false
 } else {
-    // Code to execute if false
-} elif {
-    // Code to exectute if false, then check if something else is true
+    // Fallback branch
 }
 ```
 
@@ -120,10 +121,35 @@ Print(x);
 - `Close(fd: int) -> int`: Close a file descriptor.
 - `Read(path: string) -> string`: Read entire file content.
 - `Write(fd: int, data: string) -> int`: Write string to file descriptor.
+- `ReadFilesize(path: string) -> int`: File size in bytes.
+- `Remove(path: string) -> int`: Remove a file.
+- `MkdirP(path: string) -> int`: Create directories recursively (mkdir -p).
+- `RemoveAll(path: string) -> int`: Recursively delete path (rm -rf).
+- `CopyFile(src: string, dst: string) -> int`: Copy a file.
 - `SHA256(data: string) -> string`: Compute SHA256 hash.
 - `Sys(command: string) -> int`: Execute a system command.
 - `GetArg(index: int) -> string`: Get command line argument.
 - `Argc() -> int`: Get number of command line arguments.
+- `Exit(code: int)`: Terminate process.
+- `Input() -> string`: Read a line from stdin.
+- `GC()`: Trigger the garbage collector.
+- `Sleep(ms: int) -> int`: Sleep for milliseconds.
+- `Clock() -> int`: Monotonic clock ticks.
+- `Now() -> int`: Unix timestamp.
+- `RandInt() -> int`: Random 64-bit int.
+
+### Networking
+- `TcpConnect(host: string, port: int) -> int`
+- `TcpSend(fd: int, data: string) -> int`
+- `TcpRecv(fd: int, max_bytes: int) -> string`
+- `TcpClose(fd: int) -> int`
+- `TcpResolve(host: string) -> string`
+- `TlsConnect(host: string, port: int) -> int`
+- `TlsSend(fd: int, data: string) -> int`
+- `TlsRecv(fd: int, max_bytes: int) -> string`
+- `TlsClose(fd: int) -> int`
+- `HttpGet(host: string, path: string, use_tls: int) -> string`
+- `HttpDownload(host: string, path: string, use_tls: int, dest: string) -> int`
 
 ### Complex Conditions
 ```vyl
@@ -139,31 +165,36 @@ if (x > 5) {
 
 ```vyl
 // Calculate factorial
-Main() {
+Function Main(argc, argv) {
     var n = 5;
     var result = 1;
     var i = 1;
-    
+
     while (i <= n) {
         result = result * i;
         i = i + 1;
     }
-    
+
     Print("Factorial of");
     Print(n);
     Print("is");
     Print(result);
 }
+
+// Simple HTTP GET
+Function Fetch() {
+    var string body = HttpGet("example.com", "/", 0);
+    Print(body);
+}
 ```
 
-## Language Limitations (Current Version)
+## Language Limitations (v0.2.5)
 
-- No function parameters
-- No return values
-- No arrays or structs
-- No import system
-- No operator overloading
-- No exception handling
+- Structs are declarations only (no layout or field access in codegen yet).
+- Arrays are int-only; indexing is null/bounds-checked and aborts on violation.
+- Includes inline files; no modules/packages yet.
+- Networking is blocking and IPv4-focused.
+- No exception handling or operator overloading.
 
 ## Style Guide
 

@@ -55,8 +55,9 @@ class VarDecl(ASTNode):
 @dataclass
 class Assignment(ASTNode):
     """Variable assignment: name = value"""
-    name: str = ""
+    name: str = ""  # for simple identifier assignments
     value: ASTNode = None
+    target: Optional[ASTNode] = None  # can be FieldAccess when assigning to a field
 
 
 @dataclass
@@ -144,6 +145,20 @@ class Literal(ASTNode):
 class Identifier(ASTNode):
     """Variable reference"""
     name: str = ""
+
+
+@dataclass
+class FieldAccess(ASTNode):
+    """Field access: expr.field"""
+    receiver: ASTNode = None
+    field: str = ""
+
+
+@dataclass
+class IndexExpr(ASTNode):
+    """Index access: expr[index]"""
+    receiver: ASTNode = None
+    index: ASTNode = None
 
 
 class Parser:
@@ -315,7 +330,7 @@ class Parser:
             # Parse a field: var <type-or-identifier> <name>;
             self.consume('VAR')
             field_type = None
-            if self.current_token and self.current_token.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE']:
+            if self.current_token and self.current_token.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE', 'ARRAY_TYPE']:
                 field_type = self.current_token.value
                 self.advance()
             elif self.current_token and self.current_token.type == 'IDENTIFIER':
@@ -341,7 +356,7 @@ class Parser:
         if not self.current_token:
             raise SyntaxError("Expected type annotation")
         tok = self.current_token
-        if tok.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE']:
+        if tok.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE', 'ARRAY_TYPE']:
             self.advance()
             return tok.value
         raise SyntaxError(f"Expected type, got {tok.type}")
@@ -360,7 +375,7 @@ class Parser:
         self.consume('VAR')
 
         var_type = None
-        if self.current_token and self.current_token.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE']:
+        if self.current_token and self.current_token.type in ['INT_TYPE', 'DEC_TYPE', 'STRING_TYPE', 'BOOL_TYPE', 'INF_TYPE', 'ARRAY_TYPE']:
             var_type = self.current_token.value
             self.advance()
 
@@ -400,28 +415,59 @@ class Parser:
                       line=name_token.line, column=name_token.column)
     
     def parse_assignment_or_call(self) -> ASTNode:
-        """Parse assignment or function call (no implicit definitions)."""
-        name_token = self.consume('IDENTIFIER')
-        name = name_token.value
+        """Parse assignment or function call (supports field lvalues)."""
+        lhs = self.parse_postfix_identifier()
 
+        # Function call already produced by postfix
+        if isinstance(lhs, FunctionCall):
+            return lhs
+
+        # Expect assignment
+        if not self.current_token or self.current_token.type != 'ASSIGN':
+            raise SyntaxError(f"Expected ASSIGN, got {self.current_token.type if self.current_token else 'EOF'} at line {lhs.line}")
+        self.consume('ASSIGN')
+        value = self.parse_expression()
+
+        if isinstance(lhs, Identifier):
+            return Assignment(name=lhs.name, value=value, target=None,
+                              line=lhs.line, column=lhs.column)
+        if isinstance(lhs, (FieldAccess, IndexExpr)):
+            return Assignment(name="", value=value, target=lhs,
+                              line=lhs.line, column=lhs.column)
+        raise SyntaxError("Invalid assignment target")
+
+    def parse_postfix_identifier(self) -> ASTNode:
+        """Parse identifier with optional call, indexing, or field access chains."""
+        name_token = self.consume('IDENTIFIER')
+        node: ASTNode = Identifier(name=name_token.value, line=name_token.line, column=name_token.column)
+
+        # Function call suffix
         if self.current_token and self.current_token.type == 'LPAREN':
             self.consume('LPAREN')
             arguments = []
-
             if self.current_token and self.current_token.type != 'RPAREN':
                 arguments.append(self.parse_expression())
                 while self.current_token and self.current_token.type == 'COMMA':
                     self.consume('COMMA')
                     arguments.append(self.parse_expression())
-
             self.consume('RPAREN')
-            return FunctionCall(name=name, arguments=arguments,
-                              line=name_token.line, column=name_token.column)
+            node = FunctionCall(name=name_token.value, arguments=arguments,
+                                line=name_token.line, column=name_token.column)
 
-        self.consume('ASSIGN')
-        value = self.parse_expression()
-        return Assignment(name=name, value=value,
-                         line=name_token.line, column=name_token.column)
+        # Field/index chain (left-to-right)
+        while self.current_token and self.current_token.type in ('DOT', 'LBRACKET'):
+            if self.current_token.type == 'DOT':
+                self.consume('DOT')
+                field_tok = self.consume('IDENTIFIER')
+                node = FieldAccess(receiver=node, field=field_tok.value,
+                                    line=field_tok.line, column=field_tok.column)
+            else:
+                lbr = self.consume('LBRACKET')
+                idx_expr = self.parse_expression()
+                self.consume('RBRACKET')
+                node = IndexExpr(receiver=node, index=idx_expr,
+                                 line=lbr.line, column=lbr.column)
+        return node
     
     def parse_block(self) -> Block:
         """Parse a code block: { statements }"""
@@ -498,29 +544,8 @@ class Parser:
                       line=for_token.line, column=for_token.column)
     
     def parse_expression(self) -> ASTNode:
-        """Parse expression with operator precedence"""
-        return self.parse_logical_or()
-
-    def parse_logical_or(self) -> ASTNode:
-        node = self.parse_logical_and()
-        while self.current_token and self.current_token.type == 'OR':
-            op = self.current_token.value
-            self.advance()
-            right = self.parse_logical_and()
-            node = BinaryExpr(left=node, operator=op, right=right,
-                             line=node.line, column=node.column)
-        return node
-
-    def parse_logical_and(self) -> ASTNode:
-        node = self.parse_comparison()
-        while self.current_token and self.current_token.type == 'AND':
-            op = self.current_token.value
-            self.advance()
-            right = self.parse_comparison()
-            node = BinaryExpr(left=node, operator=op, right=right,
-                             line=node.line, column=node.column)
-        return node
-    
+        """Parse a full expression with precedence."""
+        return self.parse_comparison()
     def parse_comparison(self) -> ASTNode:
         """Parse comparison operators"""
         node = self.parse_term()
@@ -575,65 +600,39 @@ class Parser:
         """Parse primary expressions"""
         if not self.current_token:
             raise SyntaxError("Unexpected end of expression")
-        
+
         token = self.current_token
-        
+
         # Parenthesized expression
         if token.type == 'LPAREN':
             self.consume('LPAREN')
             expr = self.parse_expression()
             self.consume('RPAREN')
             return expr
-        
+
         # Literals
         if token.type == 'INTEGER':
             self.advance()
             return Literal(value=token.int_value, literal_type='int',
                           line=token.line, column=token.column)
-        
+
         if token.type == 'DECIMAL':
             self.advance()
             return Literal(value=token.dec_value, literal_type='dec',
                           line=token.line, column=token.column)
-        
+
         if token.type == 'STRING':
             self.advance()
             return Literal(value=token.value, literal_type='string',
                           line=token.line, column=token.column)
-        
-        if token.type == 'TRUE':
+
+        if token.type == 'BOOL':
             self.advance()
-            return Literal(value=True, literal_type='bool',
+            return Literal(value=token.value, literal_type='bool',
                           line=token.line, column=token.column)
-        
-        if token.type == 'FALSE':
-            self.advance()
-            return Literal(value=False, literal_type='bool',
-                          line=token.line, column=token.column)
-        
-        # Identifier (variable reference or function call)
+
         if token.type == 'IDENTIFIER':
-            name = token.value
-            line = token.line
-            column = token.column
-            self.advance()
-            
-            # Check if this is a function call
-            if self.current_token and self.current_token.type == 'LPAREN':
-                self.consume('LPAREN')
-                arguments = []
-                
-                if self.current_token and self.current_token.type != 'RPAREN':
-                    arguments.append(self.parse_expression())
-                    while self.current_token and self.current_token.type == 'COMMA':
-                        self.consume('COMMA')
-                        arguments.append(self.parse_expression())
-                
-                self.consume('RPAREN')
-                return FunctionCall(name=name, arguments=arguments, line=line, column=column)
-            
-            # Otherwise it's a variable reference
-            return Identifier(name=name, line=line, column=column)
+            return self.parse_postfix_identifier()
 
         raise SyntaxError(f"Unexpected token {token.type} at line {token.line}")
 

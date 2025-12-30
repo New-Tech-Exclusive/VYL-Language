@@ -1,0 +1,54 @@
+Function Min(a: int, b: int) -> int {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+Function Jumpsearch(arr: array, target: int) -> int {
+    var int n = Length(arr);
+    if (n == 0) {
+        return -1;
+    }
+
+    var int step = Sqrt(n);
+    if (step == 0) {
+        step = 1;
+    }
+    var int prev = 0;
+
+    while (arr[Min(step, n) - 1] < target) {
+        prev = step;
+        step = step + step; // jump ahead by step size
+        if (prev >= n) {
+            return -1; // Not found
+        }
+    }
+
+    var int i = prev;
+    var int limit = Min(step, n);
+    while (i < limit) {
+        if (arr[i] == target) {
+            return i; // Found
+        }
+        i = i + 1;
+    }
+
+    return -1; // Not found
+}
+
+Function Main() {
+    var int length = 25;
+    var arr = Array(length);
+
+    // Populate a sorted arithmetic progression: 2, 5, 8, ...
+    var int i = 0;
+    while (i < length) {
+        arr[i] = 2 + (3 * i);
+        i = i + 1;
+    }
+
+    var int idx = Jumpsearch(arr, 20);
+    Print("Index of 20: ");
+    Print(idx);
+}

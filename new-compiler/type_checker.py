@@ -22,6 +22,8 @@ try:
         Literal,
         Identifier,
         StructDef,
+        FieldAccess,
+        IndexExpr,
     )
     from .validator import ValidationError
 except ImportError:  # pragma: no cover
@@ -41,6 +43,8 @@ except ImportError:  # pragma: no cover
         Literal,
         Identifier,
         StructDef,
+        FieldAccess,
+        IndexExpr,
     )
     from validator import ValidationError  # type: ignore
 
@@ -59,7 +63,7 @@ BUILTINS: Dict[str, Tuple[List[Optional[str]], Optional[str]]] = {
     "CreateFolder": ([STRING], "int"),
     "Open": ([STRING, STRING], "int"),
     "Close": (["int"], "int"),
-    "Read": ([STRING], STRING),
+    "Read": (["int"], STRING),
     "Write": (["int", STRING], "int"),
     "SHA256": ([STRING], STRING),
     "Argc": ([], "int"),
@@ -68,12 +72,46 @@ BUILTINS: Dict[str, Tuple[List[Optional[str]], Optional[str]]] = {
     "GC": ([], None),
     "Sys": ([STRING], "int"),
     "Input": ([], STRING),
+    "Exit": (["int"], None),
+    "Sleep": (["int"], "int"),
+    "Now": ([], "int"),
+    "RandInt": ([], "int"),
+    "Remove": ([STRING], "int"),
+    "MkdirP": ([STRING], "int"),
+    "RemoveAll": ([STRING], "int"),
+    "CopyFile": ([STRING, STRING], "int"),
+    "Unzip": ([STRING, STRING], "int"),
+    "StrConcat": ([STRING, STRING], STRING),
+    "StrLen": ([STRING], "int"),
+    "StrFind": ([STRING, STRING], "int"),
+    "Substring": ([STRING, "int", "int"], STRING),
+    "GetEnv": ([STRING], STRING),
+    "Sys": ([STRING], "int"),
+    "TcpConnect": ([STRING, "int"], "int"),
+    "TcpSend": (["int", STRING], "int"),
+    "TcpRecv": (["int", "int"], STRING),
+    "TcpClose": (["int"], "int"),
+    "TcpResolve": ([STRING], STRING),
+    "TlsConnect": ([STRING, "int"], "int"),
+    "TlsSend": (["int", STRING], "int"),
+    "TlsRecv": (["int", "int"], STRING),
+    "TlsClose": (["int"], "int"),
+    "HttpGet": ([STRING, STRING, "int"], STRING),
+    "HttpDownload": ([STRING, STRING, "int", STRING], "int"),
+    "Array": (["int"], "array"),
+    "Length": (["array"], "int"),
+    "Sqrt": (["int"], "int"),
+    "Malloc": (["int"], "int"),
+    "Free": (["int"], "int"),
+    "Memcpy": (["int", "int", "int"], "int"),
+    "Memset": (["int", "int", "int"], "int"),
 }
 
 
 def type_check(program: Program) -> None:
     globals_table: TypeEnv = {}
     functions: Dict[str, FunctionDef] = {}
+    structs: Dict[str, StructDef] = {s.name: s for s in program.statements if isinstance(s, StructDef)}
 
     for stmt in program.statements:
         if isinstance(stmt, VarDecl):
@@ -88,10 +126,10 @@ def type_check(program: Program) -> None:
 
     for stmt in program.statements:
         if isinstance(stmt, FunctionDef):
-            _type_check_function(stmt, globals_table, functions)
+            _type_check_function(stmt, globals_table, functions, structs)
         elif isinstance(stmt, VarDecl):
             if stmt.value:
-                val_type = _type_of_expression(stmt.value, globals_table, {}, functions)
+                val_type = _type_of_expression(stmt.value, globals_table, {}, functions, structs)
                 if stmt.name in globals_table:
                     cur_t, cur_mut = globals_table[stmt.name]
                     if cur_t == "int" and stmt.var_type in (None, "inf"):
@@ -99,7 +137,7 @@ def type_check(program: Program) -> None:
         elif isinstance(stmt, StructDef):
             continue
         else:
-            _type_check_statement(stmt, globals_table, {}, functions, func_ret=None)
+            _type_check_statement(stmt, globals_table, {}, functions, structs, func_ret=None)
 
 
 def _define_var(env: TypeEnv, decl: VarDecl) -> None:
@@ -119,7 +157,7 @@ def _register_function(funcs: Dict[str, FunctionDef], func: FunctionDef) -> None
     funcs[func.name] = func
 
 
-def _type_check_function(func: FunctionDef, globals_table: TypeEnv, functions: Dict[str, FunctionDef]) -> None:
+def _type_check_function(func: FunctionDef, globals_table: TypeEnv, functions: Dict[str, FunctionDef], structs: Dict[str, StructDef]) -> None:
     locals_table: TypeEnv = {}
     for pname, ptype in func.params:
         if pname in locals_table:
@@ -127,15 +165,15 @@ def _type_check_function(func: FunctionDef, globals_table: TypeEnv, functions: D
         locals_table[pname] = (ptype or "int", True)
 
     for stmt in func.body.statements if func.body else []:
-        _type_check_statement(stmt, globals_table, locals_table, functions, func_ret=func.return_type or None)
+        _type_check_statement(stmt, globals_table, locals_table, functions, structs, func_ret=func.return_type or None)
 
 
-def _type_check_statement(stmt, globals_table: TypeEnv, locals_table: TypeEnv, functions: Dict[str, FunctionDef], func_ret: Optional[str]) -> None:
+def _type_check_statement(stmt, globals_table: TypeEnv, locals_table: TypeEnv, functions: Dict[str, FunctionDef], structs: Dict[str, StructDef], func_ret: Optional[str]) -> None:
     if isinstance(stmt, VarDecl):
         if stmt.name in locals_table:
             raise ValidationError(f"Duplicate local variable '{stmt.name}'", stmt.line, stmt.column)
         if stmt.value:
-            val_type = _type_of_expression(stmt.value, globals_table, locals_table, functions)
+            val_type = _type_of_expression(stmt.value, globals_table, locals_table, functions, structs)
             decl_type_hint = None if stmt.var_type in (None, "inf") else stmt.var_type
             decl_type = decl_type_hint or val_type or "int"
         else:
@@ -144,51 +182,56 @@ def _type_check_statement(stmt, globals_table: TypeEnv, locals_table: TypeEnv, f
                 decl_type = "int"
         locals_table[stmt.name] = (decl_type, stmt.is_mutable)
     elif isinstance(stmt, Assignment):
-        if stmt.name in locals_table:
-            target_type, is_mut = locals_table[stmt.name]
-        elif stmt.name in globals_table:
-            target_type, is_mut = globals_table[stmt.name]
+        if stmt.target:
+            target_type = _type_of_expression(stmt.target, globals_table, locals_table, functions, structs)
+            val_type = _type_of_expression(stmt.value, globals_table, locals_table, functions, structs)
+            _ensure_assignable(target_type, val_type, stmt.line, stmt.column)
         else:
-            raise ValidationError(f"Assignment to undefined identifier '{stmt.name}'", stmt.line, stmt.column)
-        if not is_mut:
-            raise ValidationError(f"Cannot assign to immutable binding '{stmt.name}'", stmt.line, stmt.column)
-        val_type = _type_of_expression(stmt.value, globals_table, locals_table, functions)
-        _ensure_assignable(target_type, val_type, stmt.line, stmt.column)
+            if stmt.name in locals_table:
+                target_type, is_mut = locals_table[stmt.name]
+            elif stmt.name in globals_table:
+                target_type, is_mut = globals_table[stmt.name]
+            else:
+                raise ValidationError(f"Assignment to undefined identifier '{stmt.name}'", stmt.line, stmt.column)
+            if not is_mut:
+                raise ValidationError(f"Cannot assign to immutable binding '{stmt.name}'", stmt.line, stmt.column)
+            val_type = _type_of_expression(stmt.value, globals_table, locals_table, functions, structs)
+            _ensure_assignable(target_type, val_type, stmt.line, stmt.column)
     elif isinstance(stmt, FunctionCall):
-        _type_of_expression(stmt, globals_table, locals_table, functions)
+        _type_of_expression(stmt, globals_table, locals_table, functions, structs)
     elif isinstance(stmt, IfStmt):
-        cond_t = _type_of_expression(stmt.condition, globals_table, locals_table, functions)
+        cond_t = _type_of_expression(stmt.condition, globals_table, locals_table, functions, structs)
         _require_bool(cond_t, stmt.condition.line, stmt.condition.column)
-        _type_check_statement(stmt.then_block, globals_table, dict(locals_table), functions, func_ret)
+        _type_check_statement(stmt.then_block, globals_table, dict(locals_table), functions, structs, func_ret)
         if stmt.else_block:
-            _type_check_statement(stmt.else_block, globals_table, dict(locals_table), functions, func_ret)
+            _type_check_statement(stmt.else_block, globals_table, dict(locals_table), functions, structs, func_ret)
     elif isinstance(stmt, WhileStmt):
-        cond_t = _type_of_expression(stmt.condition, globals_table, locals_table, functions)
+        cond_t = _type_of_expression(stmt.condition, globals_table, locals_table, functions, structs)
         _require_bool(cond_t, stmt.condition.line, stmt.condition.column)
-        _type_check_statement(stmt.body, globals_table, dict(locals_table), functions, func_ret)
+        _type_check_statement(stmt.body, globals_table, dict(locals_table), functions, structs, func_ret)
     elif isinstance(stmt, ForStmt):
-        start_t = _type_of_expression(stmt.start, globals_table, locals_table, functions)
-        end_t = _type_of_expression(stmt.end, globals_table, locals_table, functions)
+        start_t = _type_of_expression(stmt.start, globals_table, locals_table, functions, structs)
+        end_t = _type_of_expression(stmt.end, globals_table, locals_table, functions, structs)
         _require_numeric(start_t, stmt.start.line, stmt.start.column)
         _require_numeric(end_t, stmt.end.line, stmt.end.column)
         loop_locals = dict(locals_table)
         loop_locals[stmt.var_name] = ("int", True)
-        _type_check_statement(stmt.body, globals_table, loop_locals, functions, func_ret)
+        _type_check_statement(stmt.body, globals_table, loop_locals, functions, structs, func_ret)
     elif isinstance(stmt, Block):
         scope_locals = dict(locals_table)
         for inner in stmt.statements:
-            _type_check_statement(inner, globals_table, scope_locals, functions, func_ret)
+            _type_check_statement(inner, globals_table, scope_locals, functions, structs, func_ret)
     elif isinstance(stmt, ReturnStmt):
-        ret_type = _type_of_expression(stmt.value, globals_table, locals_table, functions) if stmt.value else None
+        ret_type = _type_of_expression(stmt.value, globals_table, locals_table, functions, structs) if stmt.value else None
         if func_ret:
             _ensure_assignable(func_ret, ret_type or "void", stmt.line, stmt.column)
     elif isinstance(stmt, StructDef):
         return
     else:
-        _type_of_expression(stmt, globals_table, locals_table, functions)
+        _type_of_expression(stmt, globals_table, locals_table, functions, structs)
 
 
-def _type_of_expression(expr, globals_table: TypeEnv, locals_table: TypeEnv, functions: Dict[str, FunctionDef]) -> str:
+def _type_of_expression(expr, globals_table: TypeEnv, locals_table: TypeEnv, functions: Dict[str, FunctionDef], structs: Dict[str, StructDef]) -> str:
     if isinstance(expr, Literal):
         return expr.literal_type
     if isinstance(expr, Identifier):
@@ -200,7 +243,7 @@ def _type_of_expression(expr, globals_table: TypeEnv, locals_table: TypeEnv, fun
             return "int"
         raise ValidationError(f"Undefined identifier '{expr.name}'", expr.line, expr.column)
     if isinstance(expr, UnaryExpr):
-        t = _type_of_expression(expr.operand, globals_table, locals_table, functions)
+        t = _type_of_expression(expr.operand, globals_table, locals_table, functions, structs)
         if expr.operator in ('-', '+'):
             _require_numeric(t, expr.line, expr.column)
             return t
@@ -209,8 +252,8 @@ def _type_of_expression(expr, globals_table: TypeEnv, locals_table: TypeEnv, fun
             return BOOL
         raise ValidationError(f"Unsupported unary operator '{expr.operator}'", expr.line, expr.column)
     if isinstance(expr, BinaryExpr):
-        left_t = _type_of_expression(expr.left, globals_table, locals_table, functions)
-        right_t = _type_of_expression(expr.right, globals_table, locals_table, functions)
+        left_t = _type_of_expression(expr.left, globals_table, locals_table, functions, structs)
+        right_t = _type_of_expression(expr.right, globals_table, locals_table, functions, structs)
         op = expr.operator
         if op == '+':
             if left_t == STRING and right_t == STRING:
@@ -240,7 +283,7 @@ def _type_of_expression(expr, globals_table: TypeEnv, locals_table: TypeEnv, fun
             if not expr.arguments:
                 raise ValidationError("Function 'CreateFolder' expects at least 1 arg", expr.line, expr.column)
             for arg in expr.arguments:
-                arg_t = _type_of_expression(arg, globals_table, locals_table, functions)
+                arg_t = _type_of_expression(arg, globals_table, locals_table, functions, structs)
                 _ensure_assignable(STRING, arg_t, arg.line, arg.column)
             return "int"
         if expr.name in BUILTINS:
@@ -250,7 +293,7 @@ def _type_of_expression(expr, globals_table: TypeEnv, locals_table: TypeEnv, fun
             elif len(sig_params) != len(expr.arguments):
                 raise ValidationError(f"Function '{expr.name}' expects {len(sig_params)} args, got {len(expr.arguments)}", expr.line, expr.column)
             for idx, arg in enumerate(expr.arguments):
-                arg_t = _type_of_expression(arg, globals_table, locals_table, functions)
+                arg_t = _type_of_expression(arg, globals_table, locals_table, functions, structs)
                 if idx < len(sig_params) and sig_params[idx] is not None:
                     _ensure_assignable(sig_params[idx], arg_t, arg.line, arg.column)
             return sig_ret or "int"
@@ -260,22 +303,38 @@ def _type_of_expression(expr, globals_table: TypeEnv, locals_table: TypeEnv, fun
         if len(fn.params) != len(expr.arguments):
             raise ValidationError(f"Function '{expr.name}' expects {len(fn.params)} args, got {len(expr.arguments)}", expr.line, expr.column)
         for (pname, ptype), arg in zip(fn.params, expr.arguments):
-            arg_t = _type_of_expression(arg, globals_table, locals_table, functions)
+            arg_t = _type_of_expression(arg, globals_table, locals_table, functions, structs)
             expected = ptype or "int"
             _ensure_assignable(expected, arg_t, arg.line, arg.column)
         return fn.return_type or "int"
+    if isinstance(expr, FieldAccess):
+        recv_type = _type_of_expression(expr.receiver, globals_table, locals_table, functions, structs)
+        if recv_type not in structs:
+            raise ValidationError(f"Field access on non-struct type '{recv_type}'", expr.line, expr.column)
+        struct_def = structs[recv_type]
+        for fld in struct_def.fields:
+            if fld.name == expr.field:
+                return fld.var_type or "int"
+        raise ValidationError(f"Unknown field '{expr.field}' on struct '{recv_type}'", expr.line, expr.column)
+    if isinstance(expr, IndexExpr):
+        arr_t = _type_of_expression(expr.receiver, globals_table, locals_table, functions, structs)
+        if arr_t != "array":
+            raise ValidationError(f"Indexing requires array, got '{arr_t}'", expr.line, expr.column)
+        idx_t = _type_of_expression(expr.index, globals_table, locals_table, functions, structs)
+        _require_numeric(idx_t, expr.index.line, expr.index.column)
+        return "int"
     if isinstance(expr, Block):
         scope_locals = dict(locals_table)
         last_type = "void"
         for inner in expr.statements:
-            last_type = _type_check_statement_expr(inner, globals_table, scope_locals, functions)
+            last_type = _type_check_statement_expr(inner, globals_table, scope_locals, functions, structs)
         return last_type
     raise ValidationError("Unsupported expression encountered", expr.line if hasattr(expr, "line") else 0, getattr(expr, "column", 0))
 
 
-def _type_check_statement_expr(stmt, globals_table: TypeEnv, locals_table: TypeEnv, functions: Dict[str, FunctionDef]) -> str:
+def _type_check_statement_expr(stmt, globals_table: TypeEnv, locals_table: TypeEnv, functions: Dict[str, FunctionDef], structs: Dict[str, StructDef]) -> str:
     # Helper to type-check a statement used as expression; return last expression type or void.
-    _type_check_statement(stmt, globals_table, locals_table, functions, func_ret=None)
+    _type_check_statement(stmt, globals_table, locals_table, functions, structs, func_ret=None)
     return "void"
 
 

@@ -1,0 +1,11 @@
+// Hello module for VYL
+
+Function SayHello() {
+    Print("Hello from the hello module!\n");
+}
+
+Function SayHelloTo(name: string) {
+    Print("Hello, ");
+    Print(name);
+    Print("!\n");
+}

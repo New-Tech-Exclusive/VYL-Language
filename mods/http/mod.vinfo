@@ -1,0 +1,4 @@
+name=http
+version=1.0.0
+author=VYL Team
+description=HTTP download utilities

@@ -54,6 +54,7 @@ KEYWORDS = {
     'dec': 'DEC_TYPE',
     'string': 'STRING_TYPE',
     'bool': 'BOOL_TYPE',
+    'array': 'ARRAY_TYPE',
     'inf': 'INF_TYPE',
     'Inf': 'INF_TYPE',
     'true': 'TRUE',

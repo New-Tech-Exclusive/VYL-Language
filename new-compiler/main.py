@@ -48,16 +48,44 @@ except ImportError:
         raise
 
 
-INCLUDE_PATTERN = re.compile(r'^\s*(include|import)\s+"([^"]+)"\s*;?\s*$')
+INCLUDE_PATTERN = re.compile(r'^\s*include\s+"([^"]+)"\s*;?\s*$')
+IMPORT_PATTERN = re.compile(r'^\s*import\s+"([^"]+)"\s*;?\s*$')
+
+# Global modules directory
+VYL_MODULES_DIR = Path.home() / ".vyl" / "modules"
 
 
 def preprocess_includes(source_code: str, base_dir: Path, seen: set[Path]) -> str:
-    """Recursively inline local .vyl files referenced by include/import directives."""
+    """Recursively inline .vyl files.
+    
+    - include "path.vyl" -> relative to current file's directory
+    - import "name" -> looks up ~/.vyl/modules/<name>/mod.vyl
+    """
     result = []
     for line in source_code.splitlines():
-        match = INCLUDE_PATTERN.match(line)
-        if match:
-            rel_path = match.group(2)
+        # Check for import first (global modules)
+        import_match = IMPORT_PATTERN.match(line)
+        if import_match:
+            module_name = import_match.group(1)
+            module_path = (VYL_MODULES_DIR / module_name / "mod.vyl").resolve()
+            if module_path in seen:
+                raise SyntaxError(f"Cyclic import detected for module '{module_name}'")
+            if not module_path.exists():
+                raise FileNotFoundError(
+                    f"Module '{module_name}' not found. Expected: {module_path}\n"
+                    f"Install with: vpm install {module_name}"
+                )
+            seen.add(module_path)
+            module_text = module_path.read_text()
+            result.append(f"// begin import {module_name}")
+            result.append(preprocess_includes(module_text, module_path.parent, seen))
+            result.append(f"// end import {module_name}")
+            continue
+        
+        # Check for include (local files)
+        include_match = INCLUDE_PATTERN.match(line)
+        if include_match:
+            rel_path = include_match.group(1)
             include_path = (base_dir / rel_path).resolve()
             if include_path in seen:
                 raise SyntaxError(f"Cyclic include detected at {include_path}")
@@ -86,7 +114,7 @@ def assemble_with_keystone(assembly: str):
     return bytes(encoding)
 
 
-def compile_vyl(source_code: str, output_file: str, generate_assembly_only: bool = False, target: str = "elf", source_path: str | None = None, use_keystone: bool = False) -> bool:
+def compile_vyl(source_code: str, output_file: str, generate_assembly_only: bool = False, target: str = "elf", source_path: str | None = None, use_keystone: bool = False, keep_asm: bool = False) -> bool:
     """
     Compile VYL source code to assembly, object, executable, or flat binary.
     
@@ -172,12 +200,16 @@ def compile_vyl(source_code: str, output_file: str, generate_assembly_only: bool
                 if not tool:
                     print("  Error: gcc not found. Please install gcc.")
                     return False
-                result = subprocess.run([tool, '-no-pie', asm_file, '-o', executable_file, '-lcrypto'], capture_output=True, text=True)
+                result = subprocess.run([tool, '-no-pie', asm_file, '-o', executable_file, '-lssl', '-lcrypto'], capture_output=True, text=True)
                 if result.returncode != 0:
+                    err = result.stderr.strip()
+                    if 'crypto' in err and ('not found' in err or 'cannot find' in err):
+                        print("  Error: libcrypto missing (OpenSSL). Install libssl-dev or openssl-devel.")
                     print(f"  Error: {result.stderr}")
                     return False
                 print(f"  Executable written to {executable_file}")
-                os.remove(asm_file)
+                if not keep_asm:
+                    os.remove(asm_file)
                 return True
 
             if target == "mach":
@@ -254,6 +286,8 @@ Examples:
     parser.add_argument('-o', '--output', help='Output file name')
     parser.add_argument('-S', '--assembly', action='store_true',
                        help='Generate assembly only (don\'t assemble/link)')
+    parser.add_argument('--keep-asm', action='store_true',
+                       help='Keep the generated .s file even after successful link')
     parser.add_argument('-cm', '--mach', action='store_true',
                        help='Generate Mach-O object (macOS)')
     parser.add_argument('-cpe', '--pe', action='store_true',
@@ -308,7 +342,7 @@ Examples:
     print(f"Compiling {input_file} (target={target})...")
     print("-" * 50)
     
-    success = compile_vyl(source_code, output_file, args.assembly, target, input_file, args.keystone)
+    success = compile_vyl(source_code, output_file, args.assembly, target, input_file, args.keystone, keep_asm=args.keep_asm)
     
     print("-" * 50)
     if success:

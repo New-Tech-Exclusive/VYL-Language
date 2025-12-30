@@ -21,6 +21,8 @@ try:
         Identifier,
         ReturnStmt,
         StructDef,
+        FieldAccess,
+        IndexExpr,
     )
 except ImportError:  # pragma: no cover - fallback for direct execution
     from parser import (
@@ -39,6 +41,8 @@ except ImportError:  # pragma: no cover - fallback for direct execution
         Identifier,
         ReturnStmt,
         StructDef,
+        FieldAccess,
+        IndexExpr,
     )
 
 
@@ -54,6 +58,7 @@ class Symbol:
     offset: int  # stack offset for locals, unused for globals
     is_param: bool = False
     reg: Optional[str] = None
+    size: int = 8
 
 
 class CodeGenerator:
@@ -65,6 +70,7 @@ class CodeGenerator:
         self.params: Dict[str, Symbol] = {}
         self.globals: Dict[str, Symbol] = {}
         self.string_literals: List[Tuple[str, str]] = []
+        self.struct_layouts: Dict[str, dict] = {}
 
     # ---------- helpers ----------
     def emit(self, line: str):
@@ -107,6 +113,8 @@ class CodeGenerator:
         self.globals = {}
         self.label_counter = 0
 
+        self.struct_layouts = self.build_struct_layouts(program)
+
         self.emit(".section .text")
 
         for stmt in program.statements:
@@ -138,15 +146,23 @@ class CodeGenerator:
 
     # ---------- globals ----------
     def process_global_var(self, decl: VarDecl):
-        self.emit(".section .data")
-        self.emit(f"{decl.name}:")
-        if decl.value and isinstance(decl.value, Literal) and decl.value.literal_type != "string":
-            self.emit(f".quad {decl.value.value}")
-        else:
-            self.emit(".quad 0")
-        self.emit(".section .text")
         var_type = decl.var_type or "int"
-        self.globals[decl.name] = Symbol(decl.name, var_type, True, 0)
+        self.emit(".section .data")
+        if var_type in self.struct_layouts:
+            data_label = f"{decl.name}_data"
+            size = self.struct_layouts[var_type]["size"]
+            self.emit(f"{data_label}:")
+            self.emit(f".zero {size}")
+            self.emit(f"{decl.name}:")
+            self.emit(f".quad {data_label}")
+        else:
+            self.emit(f"{decl.name}:")
+            if decl.value and isinstance(decl.value, Literal) and decl.value.literal_type != "string":
+                self.emit(f".quad {decl.value.value}")
+            else:
+                self.emit(".quad 0")
+        self.emit(".section .text")
+        self.globals[decl.name] = Symbol(decl.name, var_type, True, 0, size=8)
 
     # ---------- functions ----------
     def generate_function(self, func: FunctionDef):
@@ -163,10 +179,20 @@ class CodeGenerator:
         saved_regs = param_reg_pool[:reg_param_count]
 
         # Stack slots for non-register params + locals
-        total_slots = (len(func.params) - reg_param_count) + len(decls)
-        stack_bytes = total_slots * 8
-        if stack_bytes:
-            stack_bytes = (stack_bytes + 15) & ~15
+        total_slots = (len(func.params) - reg_param_count)
+        locals_size = sum(self.var_size(d.var_type or "int") for d in decls)
+        stack_bytes = total_slots * 8 + locals_size
+        
+        # Account for stack alignment: after push rbp + saved_regs pushes
+        # push rbp: rsp aligned (16)
+        # each saved_reg push: toggles alignment
+        # We need total frame to maintain 16-byte alignment before calls
+        # saved_regs_bytes + stack_bytes must be multiple of 16
+        saved_regs_bytes = len(saved_regs) * 8
+        total_frame = saved_regs_bytes + stack_bytes
+        if total_frame % 16 != 0:
+            stack_bytes += 8  # add padding to align
+        
         offset = -stack_bytes if stack_bytes else 0
 
         self.emit(f".globl {func.name}")
@@ -182,13 +208,13 @@ class CodeGenerator:
 
         # Assign parameters (register-backed first, then stack-backed)
         offset_cursor = offset
-        for idx, (pname, _) in enumerate(func.params):
+        for idx, (pname, ptype) in enumerate(func.params):
             if idx < reg_param_count:
-                sym = Symbol(pname, "int", False, 0, is_param=True, reg=param_reg_pool[idx])
+                sym = Symbol(pname, ptype or "int", False, 0, is_param=True, reg=param_reg_pool[idx])
                 self.locals[pname] = sym
                 self.params[pname] = sym
             else:
-                sym = Symbol(pname, "int", False, offset_cursor, is_param=True)
+                sym = Symbol(pname, ptype or "int", False, offset_cursor, is_param=True)
                 self.locals[pname] = sym
                 self.params[pname] = sym
                 offset_cursor += 8
@@ -213,11 +239,22 @@ class CodeGenerator:
         # Assign locals after params
         for d in decls:
             var_type = d.var_type or "int"
-            sym = Symbol(d.name, var_type, False, offset_cursor)
+            size = self.var_size(var_type)
+            sym = Symbol(d.name, var_type, False, offset_cursor, size=size)
             self.locals[d.name] = sym
-            offset_cursor += 8
+            offset_cursor += size
 
         end_lbl = self.get_label("ret")
+
+        # Initialize struct locals so field access has storage
+        for d in decls:
+            var_type = d.var_type or "int"
+            if var_type in self.struct_layouts:
+                size = self.struct_layouts[var_type]["size"]
+                loc = self.get_variable_location(self.locals[d.name])
+                self.emit(f"movq ${size}, %rdi")
+                self.emit("call vyl_alloc")
+                self.emit(f"movq %rax, {loc}")
 
         if func.body:
             for stmt in func.body.statements:
@@ -244,10 +281,18 @@ class CodeGenerator:
         self.emit("movq %rdi, argc_store(%rip)")
         self.emit("movq %rsi, argv_store(%rip)")
         self.emit("movq %rbp, stack_base(%rip)")
+        # After push rbp, rsp % 16 == 0. Keep aligned for calls.
+        self.emit("subq $16, %rsp")
+        # seed rand()
+        self.emit("movq $0, %rdi")
+        self.emit("call time")
+        self.emit("movq %rax, %rdi")
+        self.emit("call srand")
         self.emit("call Main")
         self.emit("movq %rax, %rdi")
         self.emit("movq $60, %rax")
         self.emit("syscall")
+
     def generate_statement(self, stmt, end_label: Optional[str] = None):
         if isinstance(stmt, Assignment):
             self.generate_assignment(stmt)
@@ -336,6 +381,35 @@ class CodeGenerator:
                 self.emit(f"movq {self.get_variable_location(sym)}, %rax")
             return
 
+        if isinstance(expr, FieldAccess):
+            self.generate_address(expr, dest="%rax")
+            self.emit("movq (%rax), %rax")
+            return
+
+        if isinstance(expr, IndexExpr):
+            # Save base while computing index; index expression may call functions
+            self.generate_expression(expr.receiver)
+            self.emit("push %rax")
+            self.generate_expression(expr.index)
+            self.emit("movq %rax, %rcx")
+            self.emit("pop %rbx")
+            bounds_fail = self.get_label("oob")
+            self.emit("cmpq $0, %rbx")
+            self.emit(f"je {bounds_fail}")
+            self.emit("cmpq $0, %rcx")
+            self.emit(f"jl {bounds_fail}")
+            self.emit("movq -8(%rbx), %rdx")
+            self.emit("cmpq %rdx, %rcx")
+            self.emit(f"jae {bounds_fail}")
+            self.emit("imulq $8, %rcx")
+            self.emit("addq %rcx, %rbx")
+            self.emit("movq (%rbx), %rax")
+            self.emit(f"jmp {bounds_fail}_done")
+            self.emit(f"{bounds_fail}:")
+            self.emit("call vyl_bounds_fail")
+            self.emit(f"{bounds_fail}_done:")
+            return
+
         if isinstance(expr, FunctionCall):
             self.generate_function_call(expr)
             return
@@ -348,8 +422,6 @@ class CodeGenerator:
                 self.emit("cmpq $0, %rax")
                 self.emit("sete %al")
                 self.emit("movzbq %al, %rax")
-            else:
-                raise CodegenError(f"Unsupported unary operator '{expr.operator}'")
             return
 
         if isinstance(expr, BinaryExpr):
@@ -472,9 +544,86 @@ class CodeGenerator:
 
         raise CodegenError(f"Unsupported expression type: {type(expr).__name__}")
 
+    # ---------- address helpers ----------
+    def generate_address(self, expr, dest: str = "%rax", want_struct_data: bool = False) -> str:
+        if isinstance(expr, Identifier):
+            sym = self.get_variable_symbol(expr.name)
+            if not sym:
+                raise CodegenError(f"Undefined variable '{expr.name}'")
+            if sym.typ in self.struct_layouts:
+                # load pointer to struct storage
+                self.emit(f"movq {self.get_variable_location(sym)}, {dest}")
+                return sym.typ
+            self.emit(f"leaq {self.get_variable_location(sym)}, {dest}")
+            return sym.typ
+        if isinstance(expr, FieldAccess):
+            recv_type = self.generate_address(expr.receiver, dest=dest, want_struct_data=True)
+            layout = self.struct_layouts.get(recv_type)
+            if not layout:
+                raise CodegenError(f"Field access on non-struct type '{recv_type}'")
+            field_info = layout["fields"].get(expr.field)
+            if not field_info:
+                raise CodegenError(f"Unknown field '{expr.field}' on struct '{recv_type}'")
+            field_type, offset = field_info
+            if offset:
+                self.emit(f"addq ${offset}, {dest}")
+            if want_struct_data and field_type in self.struct_layouts:
+                self.emit(f"movq ({dest}), {dest}")
+            return field_type
+        if isinstance(expr, IndexExpr):
+            # dest receives address of element
+            self.generate_expression(expr.receiver)
+            self.emit("push %rax")
+            self.generate_expression(expr.index)
+            self.emit("movq %rax, %rcx")
+            self.emit("pop %rbx")
+            bounds_fail = self.get_label("oob")
+            self.emit("cmpq $0, %rbx")
+            self.emit(f"je {bounds_fail}")
+            self.emit("cmpq $0, %rcx")
+            self.emit(f"jl {bounds_fail}")
+            self.emit("movq -8(%rbx), %rdx")
+            self.emit("cmpq %rdx, %rcx")
+            self.emit(f"jae {bounds_fail}")
+            self.emit("imulq $8, %rcx")
+            self.emit("addq %rcx, %rbx")
+            self.emit(f"movq %rbx, {dest}")
+            self.emit(f"jmp {bounds_fail}_done")
+            self.emit(f"{bounds_fail}:")
+            self.emit("call vyl_bounds_fail")
+            self.emit(f"{bounds_fail}_done:")
+            return "int"
+        raise CodegenError("Unsupported lvalue expression")
+
+    def var_size(self, var_type: str) -> int:
+        if var_type in self.struct_layouts:
+            return 8  # struct variables hold pointers
+        return 8
+
+    def build_struct_layouts(self, program: Program) -> Dict[str, dict]:
+        layouts: Dict[str, dict] = {}
+        for stmt in program.statements:
+            if not isinstance(stmt, StructDef):
+                continue
+            offset = 0
+            fields: Dict[str, tuple[str, int]] = {}
+            for fld in stmt.fields:
+                ftype = fld.var_type or "int"
+                fields[fld.name] = (ftype, offset)
+                offset += 8
+            size = offset or 8
+            layouts[stmt.name] = {"size": size, "fields": fields}
+        return layouts
+
     # ---------- assignments ----------
     def generate_assignment(self, assign: Assignment):
         self.generate_expression(assign.value)
+        if assign.target:
+            self.emit("push %rax")
+            self.generate_address(assign.target, dest="%rcx")
+            self.emit("pop %rax")
+            self.emit("movq %rax, (%rcx)")
+            return
         sym = self.get_variable_symbol(assign.name)
         if sym:
             self.emit(f"movq %rax, {self.get_variable_location(sym)}")
@@ -489,8 +638,13 @@ class CodeGenerator:
                 arg = call.arguments[0]
                 self.generate_expression(arg)
                 stringy = isinstance(arg, Literal) and arg.literal_type == "string"
-                if isinstance(arg, FunctionCall) and arg.name in ("GetArg", "Read", "SHA256", "Input"):
+                if isinstance(arg, FunctionCall) and arg.name in ("GetArg", "Read", "SHA256", "Input", "GetEnv", "StrConcat", "Substring"):
                     stringy = True
+                # Check if it's a variable reference of type string
+                if isinstance(arg, Identifier):
+                    sym = self.get_variable_symbol(arg.name)
+                    if sym and sym.typ == "string":
+                        stringy = True
                 self.emit("movq %rax, %rdi")
                 self.emit("call print_string" if stringy else "call print_int")
             return
@@ -506,8 +660,9 @@ class CodeGenerator:
             self.emit("sete %al")
             self.emit("movzbq %al, %rax")
             return
-
-        if name == "Sys":
+            self.emit("subq $8, %rax")          # reserve length slot before data
+            self.emit("movq %rbx, (%rax)")      # store length
+            self.emit("addq $8, %rax")          # return data pointer
             if len(call.arguments) != 1:
                 raise CodegenError("Sys expects (command)")
             self.generate_expression(call.arguments[0])
@@ -624,6 +779,391 @@ class CodeGenerator:
                 self.emit("movq (%rbx,%rcx,8), %rax")
                 return
             raise CodegenError("GetArg expects 1 or 2 arguments")
+
+        if name == "Exit":
+            if len(call.arguments) != 1:
+                raise CodegenError("Exit expects (code)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call exit")
+            self.emit("movq $0, %rax")
+            return
+
+        if name == "Sleep":
+            if len(call.arguments) != 1:
+                raise CodegenError("Sleep expects (ms)")
+            self.generate_expression(call.arguments[0])
+            self.emit("push %rbp")
+            self.emit("movq %rsp, %rbp")
+            self.emit("push %rbx")
+            self.emit("push %r12")
+            # 208 bytes keeps rsp%16==8 after two pushes
+            self.emit("subq $208, %rsp")
+            self.emit("movq $1000, %rcx")
+            self.emit("xorq %rdx, %rdx")
+            self.emit("movq %rbx, %rax")
+            self.emit("divq %rcx")          # rax=sec, rdx=ms
+            self.emit("subq $16, %rsp")
+            self.emit("movq %rax, (%rsp)")  # tv_sec
+            self.emit("movq %rdx, %rax")
+            self.emit("movq $1000000, %rcx")
+            self.emit("imulq %rcx, %rax")   # ms->ns
+            self.emit("movq %rax, 8(%rsp)") # tv_nsec
+            self.emit("leaq (%rsp), %rdi")
+            self.emit("movq $0, %rsi")
+            self.emit("call nanosleep")
+            self.emit("addq $16, %rsp")
+            self.emit("pop %rdx")
+            self.emit("pop %rcx")
+            self.emit("pop %rbx")
+            self.emit("movq $0, %rax")
+            return
+
+        if name == "Now":
+            if len(call.arguments) != 0:
+                raise CodegenError("Now expects ()")
+            self.emit("subq $16, %rsp")
+            self.emit("movq $1, %rdi")        # CLOCK_MONOTONIC
+            self.emit("leaq (%rsp), %rsi")
+            self.emit("call clock_gettime")
+            self.emit("movq (%rsp), %rax")    # sec
+            self.emit("imulq $1000, %rax")    # sec -> ms
+            self.emit("movq %rax, %rbx")      # sec_ms
+            self.emit("movq 8(%rsp), %rcx")   # nsec
+            self.emit("movq $1000000, %r8")
+            self.emit("xorq %rdx, %rdx")
+            self.emit("movq %rcx, %rax")
+            self.emit("divq %r8")             # (nsec / 1e6) quotient in rax
+            self.emit("addq %rax, %rbx")      # total ms
+            self.emit("movq %rbx, %rax")
+            self.emit("addq $16, %rsp")
+            return
+
+        if name == "RandInt":
+            if call.arguments:
+                raise CodegenError("RandInt expects ()")
+            self.emit("call rand")
+            self.emit("movslq %eax, %rax")
+            return
+
+        if name == "Remove":
+            if len(call.arguments) != 1:
+                raise CodegenError("Remove expects (path)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call remove")
+            return
+
+        if name == "MkdirP":
+            if len(call.arguments) != 1:
+                raise CodegenError("MkdirP expects (path)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_mkdir_p")
+            return
+
+        if name == "RemoveAll":
+            if len(call.arguments) != 1:
+                raise CodegenError("RemoveAll expects (path)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_remove_all")
+            return
+
+        if name == "CopyFile":
+            if len(call.arguments) != 2:
+                raise CodegenError("CopyFile expects (src, dst)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_copy_file")
+            return
+
+        if name == "Unzip":
+            if len(call.arguments) != 2:
+                raise CodegenError("Unzip expects (zipPath, destDir)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_unzip")
+            return
+
+        if name == "Array":
+            if len(call.arguments) != 1:
+                raise CodegenError("Array expects (length)")
+            fail_lbl = self.get_label("array_fail")
+            done_lbl = self.get_label("array_done")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rbx")        # length
+            self.emit("movq %rax, %rdi")
+            self.emit("imulq $8, %rdi")         # bytes for elements
+            self.emit("addq $8, %rdi")          # + header for length
+            self.emit("call vyl_alloc")
+            self.emit("cmpq $0, %rax")
+            self.emit(f"je {fail_lbl}")
+            self.emit("movq %rbx, (%rax)")      # store length at header
+            self.emit("addq $8, %rax")          # return data pointer
+            self.emit(f"jmp {done_lbl}")
+            self.emit(f"{fail_lbl}:")
+            self.emit("movq $0, %rax")
+            self.emit(f"{done_lbl}:")
+            return
+
+        if name == "Length":
+            if len(call.arguments) != 1:
+                raise CodegenError("Length expects (array)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq -8(%rax), %rax")
+            return
+
+        if name == "Sqrt":
+            if len(call.arguments) != 1:
+                raise CodegenError("Sqrt expects (int)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_isqrt")
+            return
+
+        if name == "Malloc":
+            if len(call.arguments) != 1:
+                raise CodegenError("Malloc expects (size)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call malloc")
+            return
+
+        if name == "Free":
+            if len(call.arguments) != 1:
+                raise CodegenError("Free expects (ptr)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call free")
+            self.emit("movq $0, %rax")
+            return
+
+        if name == "Memcpy":
+            if len(call.arguments) != 3:
+                raise CodegenError("Memcpy expects (dst, src, n)")
+            self.generate_expression(call.arguments[2])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("pop %rdx")
+            self.emit("call memcpy")
+            return
+
+        if name == "Memset":
+            if len(call.arguments) != 3:
+                raise CodegenError("Memset expects (ptr, val, n)")
+            self.generate_expression(call.arguments[2])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("pop %rdx")
+            self.emit("call memset")
+            return
+
+        if name == "StrConcat":
+            # StrConcat(a, b) -> new string that is a + b
+            if len(call.arguments) != 2:
+                raise CodegenError("StrConcat expects (str1, str2)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_strconcat")
+            return
+
+        if name == "StrLen":
+            if len(call.arguments) != 1:
+                raise CodegenError("StrLen expects (str)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call strlen")
+            return
+
+        if name == "StrFind":
+            # StrFind(haystack, needle) -> index or -1
+            if len(call.arguments) != 2:
+                raise CodegenError("StrFind expects (haystack, needle)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_strfind")
+            return
+
+        if name == "Substring":
+            # Substring(str, start, len) -> new string
+            if len(call.arguments) != 3:
+                raise CodegenError("Substring expects (str, start, len)")
+            self.generate_expression(call.arguments[2])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("pop %rdx")
+            self.emit("call vyl_substring")
+            return
+
+        if name == "GetEnv":
+            # GetEnv("VAR") -> value or empty string
+            if len(call.arguments) != 1:
+                raise CodegenError("GetEnv expects (varname)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call getenv")
+            # If NULL, return empty string
+            self.emit("cmpq $0, %rax")
+            lbl = self.get_label("getenv")
+            self.emit(f"jne {lbl}")
+            self.emit("leaq .empty_str(%rip), %rax")
+            self.emit(f"{lbl}:")
+            return
+
+        if name == "Sys":
+            # Sys("command") -> exit code
+            if len(call.arguments) != 1:
+                raise CodegenError("Sys expects (command)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call system")
+            return
+
+        if name == "TcpConnect":
+            if len(call.arguments) != 2:
+                raise CodegenError("TcpConnect expects (host, port)")
+            self.generate_expression(call.arguments[0])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[1])
+            self.emit("movq %rax, %rsi")
+            self.emit("pop %rdi")
+            self.emit("call vyl_tcp_connect")
+            return
+
+        if name == "TcpSend":
+            if len(call.arguments) != 2:
+                raise CodegenError("TcpSend expects (fd, data)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_tcp_send")
+            return
+
+        if name == "TcpRecv":
+            if len(call.arguments) != 2:
+                raise CodegenError("TcpRecv expects (fd, max)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_tcp_recv")
+            return
+
+        if name == "TcpClose":
+            if len(call.arguments) != 1:
+                raise CodegenError("TcpClose expects (fd)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call close")
+            return
+
+        if name == "TcpResolve":
+            if len(call.arguments) != 1:
+                raise CodegenError("TcpResolve expects (host)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_tcp_resolve")
+            return
+
+        if name == "TlsConnect":
+            if len(call.arguments) != 2:
+                raise CodegenError("TlsConnect expects (host, port)")
+            self.generate_expression(call.arguments[0])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[1])
+            self.emit("movq %rax, %rsi")
+            self.emit("pop %rdi")
+            self.emit("call vyl_tls_connect")
+            return
+
+        if name == "TlsSend":
+            if len(call.arguments) != 2:
+                raise CodegenError("TlsSend expects (handle, data)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_tls_send")
+            return
+
+        if name == "TlsRecv":
+            if len(call.arguments) != 2:
+                raise CodegenError("TlsRecv expects (handle, max)")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("pop %rsi")
+            self.emit("call vyl_tls_recv")
+            return
+
+        if name == "TlsClose":
+            if len(call.arguments) != 1:
+                raise CodegenError("TlsClose expects (handle)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_tls_close")
+            return
+
+        if name == "HttpGet":
+            if len(call.arguments) != 3:
+                raise CodegenError("HttpGet expects (host, path, use_tls)")
+            self.generate_expression(call.arguments[0])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[2])
+            self.emit("movq %rax, %rdx")
+            self.emit("pop %rsi")
+            self.emit("pop %rdi")
+            self.emit("call vyl_http_get")
+            return
+
+        if name == "HttpDownload":
+            if len(call.arguments) != 4:
+                raise CodegenError("HttpDownload expects (host, path, use_tls, dest)")
+            self.generate_expression(call.arguments[0])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[1])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[2])
+            self.emit("push %rax")
+            self.generate_expression(call.arguments[3])
+            self.emit("movq %rax, %rcx")
+            self.emit("pop %rdx")
+            self.emit("pop %rsi")
+            self.emit("pop %rdi")
+            self.emit("call vyl_http_download")
+            return
 
         # generic call using SysV registers for first 6 args
         arg_regs = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
@@ -824,6 +1364,7 @@ class CodeGenerator:
         self.emit("argc_store: .quad 0")
         self.emit("argv_store: .quad 0")
         self.emit(".mode_rb: .asciz \"rb\"")
+        self.emit(".mode_wb: .asciz \"wb\"")
         self.emit("vyl_head: .quad 0")
         self.emit("stack_base: .quad 0")
         self.emit(".section .text")
@@ -835,6 +1376,8 @@ class CodeGenerator:
         self.emit("movq %rsp, %rbp")
         self.emit("push %rbx")
         self.emit("push %r12")
+        # 2 pushes, rsp % 16 == 0. Keep aligned.
+        self.emit("subq $16, %rsp")
         self.emit("movq %rdi, %rbx")
         self.emit("movq %rbx, %rdi")
         self.emit("call strlen")
@@ -866,6 +1409,7 @@ class CodeGenerator:
         self.emit("sha256_hex_done:")
         self.emit("movb $0, 64(%rdi)")
         self.emit("leaq sha256_hex(%rip), %rax")
+        self.emit("addq $16, %rsp")
         self.emit("pop %r12")
         self.emit("pop %rbx")
         self.emit("leave")
@@ -974,6 +1518,34 @@ class CodeGenerator:
         self.emit("leave")
         self.emit("ret")
 
+        # vyl_isqrt (integer floor sqrt)
+        self.emit(".globl vyl_isqrt")
+        self.emit("vyl_isqrt:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("cmpq $0, %rdi")
+        self.emit("jle vyl_isqrt_zero")
+        self.emit("xorq %rbx, %rbx")
+        self.emit("vyl_isqrt_loop:")
+        self.emit("movq %rbx, %rax")
+        self.emit("imulq %rbx, %rax")
+        self.emit("cmpq %rax, %rdi")
+        self.emit("jl vyl_isqrt_done")
+        self.emit("incq %rbx")
+        self.emit("jmp vyl_isqrt_loop")
+        self.emit("vyl_isqrt_done:")
+        self.emit("decq %rbx")
+        self.emit("movq %rbx, %rax")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("vyl_isqrt_zero:")
+        self.emit("movq $0, %rax")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
         # vyl_alloc (tracked malloc)
         self.emit(".globl vyl_alloc")
         self.emit("vyl_alloc:")
@@ -994,6 +1566,13 @@ class CodeGenerator:
         self.emit("pop %rbx")
         self.emit("leave")
         self.emit("ret")
+
+        # vyl_bounds_fail: abort on null/OO.B
+        self.emit(".globl vyl_bounds_fail")
+        self.emit("vyl_bounds_fail:")
+        self.emit("movq $1, %rdi")
+        self.emit("movq $60, %rax")
+        self.emit("syscall")
         self.emit("vyl_alloc_fail:")
         self.emit("movq $0, %rax")
         self.emit("pop %rbx")
@@ -1084,7 +1663,1179 @@ class CodeGenerator:
         self.emit("sha256_buf: .space 32")
         self.emit("sha256_hex: .space 65")
         self.emit("hex_table: .asciz \"0123456789abcdef\"")
+        self.emit("tls_ctx: .quad 0")
 
+        # File/dir helper strings
+        self.emit(".fmt_mkdirp: .asciz \"mkdir -p %s\"")
+        self.emit(".fmt_rmrf: .asciz \"rm -rf %s\"")
+        self.emit(".fmt_unzip: .asciz \"unzip -o -q %s -d %s\"")
+
+        # Switch back to text for networking helpers
+        self.emit(".section .text")
+
+        # Networking helpers
+        self.emit(".globl vyl_tcp_connect")
+        self.emit("vyl_tcp_connect:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        # 2 pushes = 16 bytes, rsp % 16 == 0 after these pushes
+        # Need subq that keeps rsp % 16 == 0. 208 works (0 - 208 = -208, 208 % 16 = 0)
+        self.emit("subq $208, %rsp")
+        self.emit("movq %rdi, -24(%rbp)")  # host ptr
+        self.emit("movq %rsi, -32(%rbp)")  # port int
+        # build port string at -80..-65
+        self.emit("leaq -80(%rbp), %rdi")
+        self.emit("movq $16, %rsi")
+        self.emit("leaq .fmt_port(%rip), %rdx")
+        self.emit("movq -32(%rbp), %rcx")
+        self.emit("movq $0, %rax")
+        self.emit("call snprintf")
+        # zero hints at -208..-96 (14 qwords)
+        self.emit("leaq -216(%rbp), %rdi")
+        self.emit("movq $0, %rax")
+        self.emit("movq $0, %rcx")
+        self.emit("movq $14, %rdx")
+        self.emit("vyl_tcp_zero_hints:")
+        self.emit("movq $0, (%rdi,%rcx,8)")
+        self.emit("incq %rcx")
+        self.emit("cmpq %rdx, %rcx")
+        self.emit("jl vyl_tcp_zero_hints")
+        # hints.ai_socktype = SOCK_STREAM(1)
+        self.emit("movl $1, -208(%rbp)")
+        # res pointer storage at -40
+        self.emit("leaq -40(%rbp), %r9")
+        self.emit("movq $0, -40(%rbp)")
+        # call getaddrinfo(host, portstr, &hints, &res)
+        self.emit("movq -24(%rbp), %rdi")
+        self.emit("leaq -80(%rbp), %rsi")
+        self.emit("leaq -216(%rbp), %rdx")
+        self.emit("movq %r9, %rcx")
+        self.emit("call getaddrinfo")
+        self.emit("cmpq $0, %rax")
+        self.emit("jne vyl_tcp_fail")
+        self.emit("movq -40(%rbp), %rbx")
+        self.emit("cmpq $0, %rbx")
+        self.emit("je vyl_tcp_fail")
+        # socket(res->ai_family, ai_socktype, ai_protocol)
+        self.emit("movl 4(%rbx), %edi")
+        self.emit("movl 8(%rbx), %esi")
+        self.emit("movl 12(%rbx), %edx")
+        self.emit("call socket")
+        self.emit("movq %rax, %r12")
+        self.emit("cmpq $0, %r12")
+        self.emit("jl vyl_tcp_cleanup_fail")
+        # connect(fd, res->ai_addr, res->ai_addrlen)
+        self.emit("movq %r12, %rdi")
+        self.emit("movq 24(%rbx), %rsi")
+        self.emit("movl 16(%rbx), %edx")
+        self.emit("call connect")
+        self.emit("cmpq $0, %rax")
+        self.emit("jne vyl_tcp_cleanup_fail")
+        self.emit("movq -40(%rbp), %rdi")
+        self.emit("call freeaddrinfo")
+        self.emit("movq %r12, %rax")
+        self.emit("addq $208, %rsp")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("vyl_tcp_cleanup_fail:")
+        self.emit("movq %r12, %rdi")
+        self.emit("call close")
+        self.emit("vyl_tcp_fail:")
+        self.emit("movq -40(%rbp), %rdi")
+        self.emit("cmpq $0, %rdi")
+        self.emit("je vyl_tcp_fail_ret")
+        self.emit("call freeaddrinfo")
+        self.emit("vyl_tcp_fail_ret:")
+        self.emit("movq $0, %rax")
+        self.emit("addq $208, %rsp")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_tcp_send(fd, data)
+        self.emit(".globl vyl_tcp_send")
+        self.emit("vyl_tcp_send:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        # 2 pushes, rsp % 16 == 0. Need to keep aligned for calls.
+        self.emit("subq $16, %rsp")
+        self.emit("movq %rdi, %rbx")       # fd
+        self.emit("movq %rsi, %r12")       # buf ptr
+        self.emit("movq %rsi, %rdi")       # strlen(buf)
+        self.emit("call strlen")
+        self.emit("movq %rax, %rdx")       # length
+        self.emit("movq %rbx, %rdi")       # send(fd, buf, len, 0)
+        self.emit("movq %r12, %rsi")
+        self.emit("movq $0, %rcx")
+        self.emit("call send")
+        self.emit("addq $16, %rsp")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_tcp_recv(fd, max)
+        self.emit(".globl vyl_tcp_recv")
+        self.emit("vyl_tcp_recv:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        self.emit("subq $8, %rsp")
+        self.emit("movq %rdi, %rbx")       # fd
+        self.emit("movq %rsi, %r12")       # max size
+        self.emit("movq %r12, %rdi")
+        self.emit("incq %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_tcp_recv_fail")
+        self.emit("movq %rax, %r13")       # buf ptr
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq %r13, %rsi")
+        self.emit("movq %r12, %rdx")
+        self.emit("movq $0, %rcx")
+        self.emit("call recv")
+        self.emit("cmpq $0, %rax")
+        self.emit("jle vyl_tcp_recv_fail")
+        self.emit("movq %rax, %rdx")
+        self.emit("movb $0, (%r13,%rdx,1)")
+        self.emit("movq %r13, %rax")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("vyl_tcp_recv_fail:")
+        self.emit("movq $0, %rax")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_tcp_resolve(host) -> string IPv4
+        self.emit(".globl vyl_tcp_resolve")
+        self.emit("vyl_tcp_resolve:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        # 2 pushes = 16 bytes, rsp % 16 == 0. Need subq that keeps aligned.
+        # 112 works (0 - 112 = -112, 112 % 16 = 0)
+        self.emit("subq $112, %rsp")
+        self.emit("movq %rdi, -24(%rbp)")  # host
+        # zero hints at -104..-24 (10 qwords)
+        self.emit("leaq -104(%rbp), %rdi")
+        self.emit("movq $0, %rax")
+        self.emit("movq $10, %rcx")
+        self.emit("vyl_tcp_resolve_zero:")
+        self.emit("movq $0, (%rdi,%rax,8)")
+        self.emit("incq %rax")
+        self.emit("cmpq %rcx, %rax")
+        self.emit("jl vyl_tcp_resolve_zero")
+        # hints.family = AF_INET(2)
+        self.emit("movl $2, -96(%rbp)")
+        # res storage at -32
+        self.emit("movq $0, -32(%rbp)")
+        self.emit("movq -24(%rbp), %rdi")
+        self.emit("movq $0, %rsi")
+        self.emit("leaq -104(%rbp), %rdx")
+        self.emit("leaq -32(%rbp), %rcx")
+        self.emit("call getaddrinfo")
+        self.emit("cmpq $0, %rax")
+        self.emit("jne vyl_tcp_resolve_fail")
+        self.emit("movq -32(%rbp), %rbx")
+        self.emit("cmpq $0, %rbx")
+        self.emit("je vyl_tcp_resolve_fail")
+        # sockaddr_in starts at ai_addr
+        self.emit("movq 24(%rbx), %rsi")
+        self.emit("addq $4, %rsi")  # skip sin_family+port
+        self.emit("movq $64, %rdx")
+        self.emit("leaq -88(%rbp), %rdi")  # buffer for IP string
+        self.emit("movl $2, %edi")         # AF_INET
+        self.emit("call inet_ntop")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_tcp_resolve_fail")
+        self.emit("movq %rax, %rdi")
+        self.emit("call strlen")
+        self.emit("incq %rax")
+        self.emit("movq %rax, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_tcp_resolve_fail")
+        self.emit("movq %rax, %r12")
+        self.emit("movq %r12, %rdi")
+        self.emit("leaq -88(%rbp), %rsi")
+        self.emit("call strcpy")
+        self.emit("movq -32(%rbp), %rdi")
+        self.emit("call freeaddrinfo")
+        self.emit("movq %r12, %rax")
+        self.emit("addq $112, %rsp")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("vyl_tcp_resolve_fail:")
+        self.emit("movq -32(%rbp), %rdi")
+        self.emit("cmpq $0, %rdi")
+        self.emit("je vyl_tcp_resolve_ret")
+        self.emit("call freeaddrinfo")
+        self.emit("vyl_tcp_resolve_ret:")
+        self.emit("movq $0, %rax")
+        self.emit("addq $112, %rsp")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        self.emit(".section .rodata")
+        self.emit(".fmt_port: .asciz \"%d\"")
+        self.emit(".empty_str: .asciz \"\"")
+        self.emit(".section .text")
+
+        # TLS helpers (OpenSSL)
+        self.emit(".globl vyl_tls_ensure_ctx")
+        self.emit("vyl_tls_ensure_ctx:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        # After push rbp, rsp % 16 == 0. Need to keep it that way for calls.
+        # Subtracting 0 or 16 works. Use 16 for a bit of scratch.
+        self.emit("subq $16, %rsp")
+        self.emit("cmpq $0, tls_ctx(%rip)")
+        self.emit("jne vyl_tls_ctx_done")
+        self.emit("movq $0, %rdi")
+        self.emit("movq $0, %rsi")
+        self.emit("call OPENSSL_init_ssl")
+        self.emit("call TLS_client_method")
+        self.emit("movq %rax, %rdi")
+        self.emit("call SSL_CTX_new")
+        self.emit("movq %rax, tls_ctx(%rip)")
+        self.emit("vyl_tls_ctx_done:")
+        self.emit("addq $16, %rsp")
+        self.emit("leave")
+        self.emit("ret")
+
+        self.emit(".globl vyl_tls_connect")
+        self.emit("vyl_tls_connect:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        # 3 pushes = 24 bytes below rbp. rsp % 16 == 8.
+        # Need subq $40 (24+40=64, still 8 mod 16) -> subq $40 gives 8-40%16=8-8=0 ✓
+        self.emit("subq $40, %rsp")
+        self.emit("movq %rdi, -32(%rbp)")   # host
+        self.emit("movq %rsi, -40(%rbp)")   # port
+        self.emit("call vyl_tls_ensure_ctx")
+        self.emit("movq -32(%rbp), %rdi")
+        self.emit("movq -40(%rbp), %rsi")
+        self.emit("call vyl_tcp_connect")
+        self.emit("movq %rax, %rbx")
+        self.emit("cmpq $0, %rbx")
+        self.emit("je vyl_tls_conn_fail")
+        self.emit("movq tls_ctx(%rip), %rdi")
+        self.emit("call SSL_new")
+        self.emit("movq %rax, %r12")
+        self.emit("cmpq $0, %r12")
+        self.emit("je vyl_tls_conn_fail_close")
+        self.emit("movq %r12, %rdi")
+        self.emit("movq %rbx, %rsi")
+        self.emit("call SSL_set_fd")
+        self.emit("cmpq $0, %rax")
+        self.emit("jle vyl_tls_conn_fail_ssl")
+        # Set SNI hostname: SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME=55, TLSEXT_NAMETYPE_host_name=0, hostname)
+        self.emit("movq %r12, %rdi")
+        self.emit("movq $55, %rsi")         # SSL_CTRL_SET_TLSEXT_HOSTNAME
+        self.emit("movq $0, %rdx")          # TLSEXT_NAMETYPE_host_name
+        self.emit("movq -32(%rbp), %rcx")   # hostname
+        self.emit("call SSL_ctrl")
+        self.emit("movq %r12, %rdi")
+        self.emit("call SSL_connect")
+        self.emit("cmpq $0, %rax")
+        self.emit("jle vyl_tls_conn_fail_ssl")
+        self.emit("movq %r12, %rax")
+        self.emit("addq $40, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("vyl_tls_conn_fail_ssl:")
+        self.emit("movq %r12, %rdi")
+        self.emit("call SSL_free")
+        self.emit("vyl_tls_conn_fail_close:")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call close")
+        self.emit("vyl_tls_conn_fail:")
+        self.emit("movq $0, %rax")
+        self.emit("addq $40, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        self.emit(".globl vyl_tls_send")
+        self.emit("vyl_tls_send:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        # 2 pushes, rsp % 16 == 0. Keep aligned.
+        self.emit("subq $16, %rsp")
+        self.emit("movq %rdi, %rbx")       # ssl_ctx
+        self.emit("movq %rsi, %r12")       # buf ptr
+        self.emit("movq %rsi, %rdi")       # strlen(buf)
+        self.emit("call strlen")
+        self.emit("movq %rax, %rdx")       # length
+        self.emit("movq %rbx, %rdi")       # SSL_write(ssl, buf, len)
+        self.emit("movq %r12, %rsi")
+        self.emit("call SSL_write")
+        self.emit("addq $16, %rsp")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        self.emit(".globl vyl_tls_recv")
+        self.emit("vyl_tls_recv:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        # 3 pushes, rsp % 16 == 8. Need subq $8 to align.
+        self.emit("subq $8, %rsp")
+        self.emit("movq %rdi, %rbx")
+        self.emit("movq %rsi, %r12")
+        self.emit("movq %r12, %rdi")
+        self.emit("incq %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_tls_recv_fail")
+        self.emit("movq %rax, %r13")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq %r13, %rsi")
+        self.emit("movq %r12, %rdx")
+        self.emit("call SSL_read")
+        self.emit("cmpq $0, %rax")
+        self.emit("jle vyl_tls_recv_fail")
+        self.emit("movq %rax, %rdx")
+        self.emit("movb $0, (%r13,%rdx,1)")
+        self.emit("movq %r13, %rax")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("vyl_tls_recv_fail:")
+        self.emit("movq $0, %rax")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        self.emit(".globl vyl_tls_close")
+        self.emit("vyl_tls_close:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("subq $8, %rsp")
+        self.emit("movq %rdi, %rbx")       # save ssl ptr
+        self.emit("movq %rbx, %rdi")
+        self.emit("call SSL_get_fd")
+        self.emit("movq %rax, %rdi")
+        self.emit("call close")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call SSL_free")
+        self.emit("movq $0, %rax")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_http_get(host, path, use_tls:int) -> string (body) or 0
+        self.emit(".globl vyl_http_get")
+        self.emit("vyl_http_get:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        # 3 pushes = 24 bytes. Locals at -32 and below. Need 128-byte buffer + 24 for vars + alignment
+        self.emit("subq $168, %rsp")
+        self.emit("movq %rdi, -32(%rbp)")   # host
+        self.emit("movq %rsi, -40(%rbp)")   # path
+        self.emit("movq %rdx, -48(%rbp)")   # use_tls
+
+        # Build request into stack buffer (-176 to -49) and then heap copy
+        self.emit("leaq -176(%rbp), %rdi")
+        self.emit("movq $128, %rsi")
+        self.emit("leaq .fmt_http_get(%rip), %rdx")
+        self.emit("movq -40(%rbp), %rcx")
+        self.emit("movq -32(%rbp), %r8")
+        self.emit("movq $0, %rax")
+        self.emit("call snprintf")
+        self.emit("movq %rax, %r12")
+        self.emit("incq %r12")
+        self.emit("movq %r12, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_fail")
+        self.emit("movq %rax, %r13")
+        self.emit("movq %r13, %rdi")
+        self.emit("leaq -176(%rbp), %rsi")
+        self.emit("call strcpy")
+
+        # Connect
+        self.emit("movq -32(%rbp), %rdi")
+        self.emit("movq $80, %rsi")
+        self.emit("movq -48(%rbp), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("jne vyl_http_tls_conn")
+        self.emit("call vyl_tcp_connect")
+        self.emit("jmp vyl_http_conn_done")
+        self.emit("vyl_http_tls_conn:")
+        self.emit("movq -32(%rbp), %rdi")   # host
+        self.emit("movq $443, %rsi")        # port
+        self.emit("call vyl_tls_connect")
+        self.emit("vyl_http_conn_done:")
+        self.emit("movq %rax, %rbx")
+        self.emit("cmpq $0, %rbx")
+        self.emit("je vyl_http_fail")
+
+        # Send request
+        self.emit("movq -48(%rbp), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_send_plain")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq %r13, %rsi")
+        self.emit("call vyl_tls_send")
+        self.emit("jmp vyl_http_after_send")
+        self.emit("vyl_http_send_plain:")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq %r13, %rsi")
+        self.emit("call vyl_tcp_send")
+        self.emit("vyl_http_after_send:")
+
+        # Receive (single chunk up to 65535)
+        self.emit("movq $65535, %rsi")
+        self.emit("movq -48(%rbp), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_recv_plain")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call vyl_tls_recv")
+        self.emit("jmp vyl_http_after_recv")
+        self.emit("vyl_http_recv_plain:")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call vyl_tcp_recv")
+        self.emit("vyl_http_after_recv:")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_cleanup")
+        self.emit("movq %rax, %r12")
+
+        # Strip headers (
+
+
+        self.emit("movq %r12, %rdi")
+        self.emit("call strlen")
+        self.emit("movq %rax, %rcx")
+        self.emit("movq %r12, %rsi")
+        self.emit("movq $0, %rdx")
+        self.emit("vyl_http_scan:")
+        self.emit("cmpq %rcx, %rdx")
+        self.emit("jge vyl_http_no_headers")
+        self.emit("movb (%rsi,%rdx,1), %al")
+        self.emit("cmpb $13, %al")
+        self.emit("jne vyl_http_next")
+        self.emit("cmpq %rcx, %rdx")
+        self.emit("addq $3, %rdx")
+        self.emit("cmpq %rcx, %rdx")
+        self.emit("jge vyl_http_next")
+        self.emit("movb -3(%rsi,%rdx,1), %al")
+        self.emit("cmpb $10, %al")
+        self.emit("jne vyl_http_next")
+        self.emit("movb -2(%rsi,%rdx,1), %al")
+        self.emit("cmpb $13, %al")
+        self.emit("jne vyl_http_next")
+        self.emit("movb -1(%rsi,%rdx,1), %al")
+        self.emit("cmpb $10, %al")
+        self.emit("jne vyl_http_next")
+        self.emit("addq $1, %rdx")
+        self.emit("leaq (%rsi,%rdx,1), %rax")
+        self.emit("movq %rax, %r12")
+        self.emit("jmp vyl_http_done")
+        self.emit("vyl_http_next:")
+        self.emit("incq %rdx")
+        self.emit("jmp vyl_http_scan")
+        self.emit("vyl_http_no_headers:")
+        self.emit("movq %rsi, %r12")
+        self.emit("vyl_http_done:")
+        self.emit("movq %r12, %rax")
+        self.emit("jmp vyl_http_ret")
+
+        self.emit("vyl_http_cleanup:")
+        self.emit("movq $0, %rax")
+
+        self.emit("vyl_http_ret:")
+        self.emit("addq $168, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        self.emit("vyl_http_fail:")
+        self.emit("movq $0, %rax")
+        self.emit("addq $168, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        self.emit(".section .rodata")
+        self.emit(".fmt_http_get: .asciz \"GET %s HTTP/1.0\\r\\nHost: %s\\r\\nUser-Agent: vyl/0.1\\r\\nConnection: close\\r\\n\\r\\n\"")
+        self.emit(".http_loc: .asciz \"Location:\"")
+        self.emit(".http_prefix: .asciz \"http://\"")
+        self.emit(".https_prefix: .asciz \"https://\"")
+        self.emit(".http_get_prefix: .asciz \"GET \"")
+        self.emit(".http_get_mid: .asciz \" HTTP/1.0\\r\\nHost: \"")
+        self.emit(".http_get_suffix: .asciz \"\\r\\nUser-Agent: vyl/0.1\\r\\nConnection: close\\r\\n\\r\\n\"")
+        self.emit(".section .text")
+
+        # vyl_http_download(host, path, use_tls, dest) -> int (0 fail, 1 success)
+        self.emit(".globl vyl_http_download")
+        self.emit("vyl_http_download:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        self.emit("push %r14")
+        self.emit("push %r15")
+        # 5 pushes = 40 bytes below rbp. After 5 pushes rsp % 16 == 8.
+        # Need subq that makes rsp % 16 == 0 for proper call alignment.
+        # 216 bytes: 8 + 216 = 224, 224 % 16 == 0
+        self.emit("subq $216, %rsp")
+        # Locals layout: -48(host), -56(path), -64(use_tls), -72(dest), -80(buf), -88(first_chunk), -96(redirect)
+        self.emit("movq %rdi, -48(%rbp)")   # host
+        self.emit("movq %rsi, -56(%rbp)")   # path
+        self.emit("movq %rdx, -64(%rbp)")   # use_tls
+        self.emit("movq %rcx, -72(%rbp)")   # dest path
+        self.emit("movq $0, -96(%rbp)")     # redirect counter
+
+        # Open dest file
+        self.emit("movq -72(%rbp), %rdi")
+        self.emit("leaq .mode_wb(%rip), %rsi")
+        self.emit("call fopen")
+        self.emit("movq %rax, %r14")
+        self.emit("cmpq $0, %r14")
+        self.emit("je vyl_http_dl_fail")
+
+        self.emit("vyl_http_dl_start:")
+        # limit redirects to 5
+        self.emit("movq -96(%rbp), %rax")
+        self.emit("cmpq $5, %rax")
+        self.emit("jge vyl_http_dl_fail_close")
+
+        # Build request string without varargs to avoid alignment issues
+        self.emit("movq -48(%rbp), %rdi")   # host
+        self.emit("call strlen")
+        self.emit("movq %rax, %r12")       # len_host
+        self.emit("movq -56(%rbp), %rdi")  # path
+        self.emit("call strlen")
+        self.emit("movq %rax, %r13")       # len_path
+        self.emit("movq %r12, %rax")
+        self.emit("addq %r13, %rax")
+        self.emit("addq $66, %rax")        # constant parts + null
+        self.emit("movq %rax, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_fail_close")
+        self.emit("movq %rax, %r13")       # req buffer
+        # strcpy(req, "GET ")
+        self.emit("movq %r13, %rdi")
+        self.emit("leaq .http_get_prefix(%rip), %rsi")
+        self.emit("call strcpy")
+        # strcat(req, path)
+        self.emit("movq %r13, %rdi")
+        self.emit("movq -56(%rbp), %rsi")
+        self.emit("call strcat")
+        # strcat(req, " HTTP/1.0\\r\\nHost: ")
+        self.emit("movq %r13, %rdi")
+        self.emit("leaq .http_get_mid(%rip), %rsi")
+        self.emit("call strcat")
+        # strcat(req, host)
+        self.emit("movq %r13, %rdi")
+        self.emit("movq -48(%rbp), %rsi")
+        self.emit("call strcat")
+        # strcat(req, suffix)
+        self.emit("movq %r13, %rdi")
+        self.emit("leaq .http_get_suffix(%rip), %rsi")
+        self.emit("call strcat")
+
+        # Connect
+        self.emit("movq -64(%rbp), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("jne vyl_http_dl_tls")
+        self.emit("movq -48(%rbp), %rdi")
+        self.emit("movq $80, %rsi")
+        self.emit("call vyl_tcp_connect")
+        self.emit("jmp vyl_http_dl_conn_done")
+        self.emit("vyl_http_dl_tls:")
+        self.emit("movq -48(%rbp), %rdi")
+        self.emit("movq $443, %rsi")
+        self.emit("call vyl_tls_connect")
+        self.emit("vyl_http_dl_conn_done:")
+        self.emit("movq %rax, %rbx")
+        self.emit("cmpq $0, %rbx")
+        self.emit("je vyl_http_dl_fail_close")
+
+        # Send request
+        self.emit("movq -64(%rbp), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_send_plain")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq %r13, %rsi")
+        self.emit("call vyl_tls_send")
+        self.emit("jmp vyl_http_dl_after_send")
+        self.emit("vyl_http_dl_send_plain:")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq %r13, %rsi")
+        self.emit("call vyl_tcp_send")
+        self.emit("vyl_http_dl_after_send:")
+
+        # recv loop - use 64KB buffer for faster downloads
+        self.emit("movq $65536, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_fail_conn")
+        self.emit("movq %rax, -80(%rbp)")  # buf
+        self.emit("movq $1, -88(%rbp)")     # first_chunk flag
+        self.emit("vyl_http_dl_loop:")
+        self.emit("movq -64(%rbp), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_plain_recv")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq -80(%rbp), %rsi")
+        self.emit("movq $65535, %rdx")
+        self.emit("call SSL_read")
+        self.emit("jmp vyl_http_dl_after_recv")
+        self.emit("vyl_http_dl_plain_recv:")
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq -80(%rbp), %rsi")
+        self.emit("movq $65535, %rdx")
+        self.emit("movq $0, %rcx")
+        self.emit("call recv")
+        self.emit("vyl_http_dl_after_recv:")
+        self.emit("cmpq $0, %rax")
+        self.emit("jle vyl_http_dl_done")
+        self.emit("movq %rax, %r12")
+        # Null-terminate buffer at offset r12
+        self.emit("movq -80(%rbp), %rdi")
+        self.emit("movb $0, (%rdi,%r12,1)")
+
+        # Load buffer pointer for write - needed for both first and subsequent chunks
+        self.emit("movq -80(%rbp), %rsi")
+
+        # handle redirects on first chunk (3xx with Location) or errors (4xx/5xx)
+        self.emit("cmpq $0, -88(%rbp)")
+        self.emit("je vyl_http_dl_write")
+        self.emit("movq $0, -88(%rbp)")
+        # %rsi already has buffer from above
+        # Check HTTP status code at position 9 (after "HTTP/1.x ")
+        # 2xx = success, 3xx = redirect, 4xx/5xx = error
+        self.emit("movb 9(%rsi), %al")
+        # Check for 4xx or 5xx errors
+        self.emit("cmpb $'4', %al")
+        self.emit("je vyl_http_dl_fail_conn")   # 4xx error
+        self.emit("cmpb $'5', %al")
+        self.emit("je vyl_http_dl_fail_conn")   # 5xx error
+        # Check for 3xx redirect
+        self.emit("cmpb $'3', %al")
+        self.emit("jne vyl_http_dl_strip_headers")  # 2xx, go strip headers
+        self.emit("movb 10(%rsi), %al")
+        self.emit("cmpb $'0', %al")
+        self.emit("jne vyl_http_dl_strip_headers")
+        self.emit("movb 11(%rsi), %al")
+        self.emit("cmpb $'1', %al")
+        self.emit("je vyl_http_dl_redir")
+        self.emit("cmpb $'2', %al")
+        self.emit("je vyl_http_dl_redir")
+        self.emit("cmpb $'7', %al")
+        self.emit("je vyl_http_dl_redir")
+        self.emit("cmpb $'8', %al")
+        self.emit("jne vyl_http_dl_strip_headers")
+
+        self.emit("vyl_http_dl_redir:")
+        # find Location header
+        self.emit("movq $0, %rdx")
+        self.emit("movq %r12, %rcx")
+        self.emit("vyl_http_dl_find_loc:")
+        self.emit("cmpq %rcx, %rdx")
+        self.emit("jge vyl_http_dl_strip_headers")
+        self.emit("leaq (%rsi,%rdx,1), %rdi")
+        self.emit("leaq .http_loc(%rip), %rsi")
+        self.emit("movq $9, %rdx")
+        self.emit("call strncmp")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_loc_found")
+        self.emit("movq -80(%rbp), %rsi")
+        self.emit("movq %rdx, %rax")
+        self.emit("incq %rax")
+        self.emit("movq %rax, %rdx")
+        self.emit("jmp vyl_http_dl_find_loc")
+
+        self.emit("vyl_http_dl_loc_found:")
+        # rdi points to "Location:"; value starts at +10 (including space)
+        self.emit("addq $10, %rdi")
+        self.emit("movq %rdi, %r15")      # save location value ptr
+
+        # detect scheme
+        self.emit("movq %r15, %rdi")
+        self.emit("leaq .https_prefix(%rip), %rsi")
+        self.emit("movq $8, %rdx")
+        self.emit("call strncmp")
+        self.emit("cmpq $0, %rax")
+        self.emit("jne vyl_http_dl_check_http")
+        self.emit("movq $1, -64(%rbp)")    # use_tls=1
+        self.emit("addq $8, %r15")         # skip https://
+        self.emit("jmp vyl_http_dl_host_parsed")
+        self.emit("vyl_http_dl_check_http:")
+        self.emit("movq %r15, %rdi")
+        self.emit("leaq .http_prefix(%rip), %rsi")
+        self.emit("movq $7, %rdx")
+        self.emit("call strncmp")
+        self.emit("cmpq $0, %rax")
+        self.emit("jne vyl_http_dl_relative")
+        self.emit("movq $0, -64(%rbp)")    # use_tls=0
+        self.emit("addq $7, %r15")         # skip http://
+        self.emit("jmp vyl_http_dl_host_parsed")
+
+        # relative redirect: host stays the same, path becomes location value
+        self.emit("vyl_http_dl_relative:")
+        self.emit("movq -48(%rbp), %rax")
+        self.emit("movq %rax, %rdi")       # host stays
+        self.emit("movq %r15, %rsi")       # path pointer
+        self.emit("jmp vyl_http_dl_copy_host_path")
+
+        # absolute redirect host parsed at r15 (start of host)
+        self.emit("vyl_http_dl_host_parsed:")
+        # find '/' separator to split host/path
+        self.emit("movq %r15, %rdi")
+        self.emit("movq $47, %rsi")
+        self.emit("call strchr")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_strip_headers")
+        self.emit("movq %rax, %rsi")       # rsi = path ptr
+        self.emit("movb $0, (%rax)")       # null-terminate host in-place
+        self.emit("movq %r15, %rdi")       # rdi = host ptr
+        self.emit("movq %rsi, %r9")        # save path ptr
+
+        self.emit("vyl_http_dl_copy_host_path:")
+        # copy host
+        self.emit("call strlen")
+        self.emit("incq %rax")
+        self.emit("movq %rax, %r12")
+        self.emit("movq %rax, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_strip_headers")
+        self.emit("movq %rax, %r10")       # new host
+        self.emit("movq %r10, %rdi")
+        self.emit("movq %r15, %rsi")
+        self.emit("call strcpy")
+        # copy path
+        self.emit("movq %r9, %rdi")
+        self.emit("call strlen")
+        self.emit("incq %rax")
+        self.emit("movq %rax, %r12")
+        self.emit("movq %rax, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_strip_headers")
+        self.emit("movq %rax, %r11")       # new path
+        self.emit("movq %r11, %rdi")
+        self.emit("movq %r9, %rsi")
+        self.emit("call strcpy")
+
+        # update host/path and restart request
+        self.emit("movq %r10, -48(%rbp)")
+        self.emit("movq %r11, -56(%rbp)")
+        self.emit("incq -96(%rbp)")        # redirect++
+        self.emit("movq %rbx, %rdi")
+        self.emit("cmpq $0, -64(%rbp)")
+        self.emit("jne vyl_http_dl_close_tls")
+        self.emit("call close")
+        self.emit("jmp vyl_http_dl_restart")
+        self.emit("vyl_http_dl_close_tls:")
+        self.emit("call vyl_tls_close")
+        self.emit("vyl_http_dl_restart:")
+        self.emit("movq $1, -88(%rbp)")
+        self.emit("jmp vyl_http_dl_start")
+
+        # strip headers on first chunk (fallback or non-redirect)
+        # Look for \r\n\r\n sequence
+        self.emit("vyl_http_dl_strip_headers:")
+        self.emit("movq -80(%rbp), %rsi")
+        self.emit("movq $0, %rdx")          # offset counter
+        self.emit("movq %r12, %rcx")        # length
+        self.emit("vyl_http_dl_scan:")
+        self.emit("cmpq %rcx, %rdx")
+        self.emit("jge vyl_http_dl_write")  # didn't find \r\n\r\n, write everything
+        self.emit("movb (%rsi,%rdx,1), %al")
+        self.emit("cmpb $13, %al")          # is it \r?
+        self.emit("jne vyl_http_dl_scan_next")
+        # Found \r at rdx. Check if next 3 bytes are \n\r\n
+        self.emit("movq %rdx, %rax")
+        self.emit("addq $3, %rax")
+        self.emit("cmpq %rcx, %rax")
+        self.emit("jge vyl_http_dl_scan_next")  # not enough bytes remaining
+        self.emit("movb 1(%rsi,%rdx,1), %al")   # byte at rdx+1
+        self.emit("cmpb $10, %al")              # == \n?
+        self.emit("jne vyl_http_dl_scan_next")
+        self.emit("movb 2(%rsi,%rdx,1), %al")   # byte at rdx+2
+        self.emit("cmpb $13, %al")              # == \r?
+        self.emit("jne vyl_http_dl_scan_next")
+        self.emit("movb 3(%rsi,%rdx,1), %al")   # byte at rdx+3
+        self.emit("cmpb $10, %al")              # == \n?
+        self.emit("jne vyl_http_dl_scan_next")
+        # Found \r\n\r\n! Body starts at rdx+4
+        self.emit("addq $4, %rdx")
+        self.emit("leaq (%rsi,%rdx,1), %rsi")  # rsi = body start
+        self.emit("movq %rcx, %rax")
+        self.emit("subq %rdx, %rax")
+        self.emit("movq %rax, %r12")           # r12 = remaining body length
+        self.emit("jmp vyl_http_dl_write")
+        self.emit("vyl_http_dl_scan_next:")
+        self.emit("incq %rdx")
+        self.emit("jmp vyl_http_dl_scan")
+
+        self.emit("vyl_http_dl_write:")
+        self.emit("cmpq $0, %r12")
+        self.emit("jle vyl_http_dl_loop")
+        # fwrite(buf, 1, len, file)
+        self.emit("movq %rsi, %rdi")
+        self.emit("movq $1, %rsi")
+        self.emit("movq %r12, %rdx")
+        self.emit("movq %r14, %rcx")
+        self.emit("call fwrite")
+        self.emit("jmp vyl_http_dl_loop")
+
+        self.emit("vyl_http_dl_done:")
+        # Close the connection properly
+        self.emit("movq -64(%rbp), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_done_plain")
+        # TLS cleanup: call SSL_shutdown and SSL_free (rbx holds SSL*)
+        self.emit("movq %rbx, %rdi")
+        self.emit("call SSL_shutdown")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call SSL_free")
+        self.emit("jmp vyl_http_dl_done_fclose")
+        self.emit("vyl_http_dl_done_plain:")
+        # Plain socket: close fd (rbx holds socket fd)
+        self.emit("movq %rbx, %rdi")
+        self.emit("call close")
+        self.emit("vyl_http_dl_done_fclose:")
+        self.emit("movq %r14, %rdi")
+        self.emit("call fclose")
+        self.emit("movq $1, %rax")
+        self.emit("jmp vyl_http_dl_ret")
+
+        self.emit("vyl_http_dl_fail_conn:")
+        # Check if TLS or plain
+        self.emit("movq -64(%rbp), %rax")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_http_dl_fail_plain")
+        # TLS cleanup
+        self.emit("movq %rbx, %rdi")
+        self.emit("call SSL_shutdown")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call SSL_free")
+        self.emit("jmp vyl_http_dl_fail_close")
+        self.emit("vyl_http_dl_fail_plain:")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call close")
+        self.emit("vyl_http_dl_fail_close:")
+        self.emit("cmpq $0, %r14")
+        self.emit("je vyl_http_dl_fail")
+        self.emit("movq %r14, %rdi")
+        self.emit("call fclose")
+        self.emit("vyl_http_dl_fail:")
+        self.emit("movq $0, %rax")
+
+        self.emit("vyl_http_dl_ret:")
+        self.emit("addq $216, %rsp")
+        self.emit("pop %r15")
+        self.emit("pop %r14")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_mkdir_p(path) -> int (1 success, 0 fail)
+        self.emit(".globl vyl_mkdir_p")
+        self.emit("vyl_mkdir_p:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("subq $280, %rsp")  # 256-byte buffer + alignment
+        self.emit("movq %rdi, %rsi")
+        self.emit("leaq -256(%rbp), %rdi")
+        self.emit("movq $256, %rdx")
+        self.emit("leaq .fmt_mkdirp(%rip), %rcx")
+        self.emit("movq $0, %rax")
+        self.emit("call snprintf")
+        self.emit("leaq -256(%rbp), %rdi")
+        self.emit("call system")
+        self.emit("cmpq $0, %rax")
+        self.emit("sete %al")
+        self.emit("movzbq %al, %rax")
+        self.emit("addq $272, %rsp")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_remove_all(path) -> int (1 success, 0 fail)
+        self.emit(".globl vyl_remove_all")
+        self.emit("vyl_remove_all:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("subq $272, %rsp")               # 272 % 16 == 0, keeps alignment
+        self.emit("movq %rdi, %rcx")               # rcx = path (format arg)
+        self.emit("leaq -256(%rbp), %rdi")         # rdi = buffer
+        self.emit("movq $256, %rsi")               # rsi = size
+        self.emit("leaq .fmt_rmrf(%rip), %rdx")    # rdx = format string
+        self.emit("movq $0, %rax")
+        self.emit("call snprintf")
+        self.emit("leaq -256(%rbp), %rdi")
+        self.emit("call system")
+        self.emit("cmpq $0, %rax")
+        self.emit("sete %al")
+        self.emit("movzbq %al, %rax")
+        self.emit("addq $272, %rsp")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_unzip(zipPath, destDir) -> int (1 success, 0 fail)
+        self.emit(".globl vyl_unzip")
+        self.emit("vyl_unzip:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        # After 2 pushes, rsp = rbp - 16, rsp % 16 == 0
+        # Need 512 byte buffer. 512 % 16 == 0, so just subq $512
+        self.emit("subq $512, %rsp")
+        self.emit("movq %rdi, %rbx")   # save zipPath
+        self.emit("movq %rsi, %r12")   # save destDir
+        # snprintf(buf, 512, "unzip -o -q %s -d %s", zipPath, destDir)
+        # buffer is at rsp (which is rbp - 16 - 512 = rbp - 528)
+        self.emit("movq %rsp, %rdi")
+        self.emit("movq $512, %rsi")
+        self.emit("leaq .fmt_unzip(%rip), %rdx")
+        self.emit("movq %rbx, %rcx")   # zipPath
+        self.emit("movq %r12, %r8")    # destDir
+        self.emit("movq $0, %rax")
+        self.emit("call snprintf")
+        self.emit("movq %rsp, %rdi")
+        self.emit("call system")
+        self.emit("cmpq $0, %rax")
+        self.emit("sete %al")
+        self.emit("movzbq %al, %rax")
+        self.emit("addq $512, %rsp")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_copy_file(src, dst) -> int (1 success, 0 fail)
+        self.emit(".globl vyl_copy_file")
+        self.emit("vyl_copy_file:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        self.emit("push %r14")
+        self.emit("subq $4120, %rsp")  # 4096-byte buffer
+        self.emit("movq %rdi, %r12")     # src path
+        self.emit("movq %rsi, %r13")     # dst path
+        # open src
+        self.emit("movq %r12, %rdi")
+        self.emit("leaq .mode_rb(%rip), %rsi")
+        self.emit("call fopen")
+        self.emit("movq %rax, %r12")     # src FILE*
+        self.emit("cmpq $0, %r12")
+        self.emit("je vyl_copy_fail")
+        # open dst
+        self.emit("movq %r13, %rdi")
+        self.emit("leaq .mode_wb(%rip), %rsi")
+        self.emit("call fopen")
+        self.emit("movq %rax, %r13")     # dst FILE*
+        self.emit("cmpq $0, %r13")
+        self.emit("je vyl_copy_close_src")
+        # buffer
+        self.emit("leaq -4096(%rbp), %r14")
+        self.emit("vyl_copy_loop:")
+        self.emit("movq %r14, %rdi")
+        self.emit("movq $1, %rsi")
+        self.emit("movq $4096, %rdx")
+        self.emit("movq %r12, %rcx")
+        self.emit("call fread")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_copy_done")
+        self.emit("movq %rax, %rbx")      # bytes read
+        self.emit("movq %r14, %rdi")
+        self.emit("movq $1, %rsi")
+        self.emit("movq %rbx, %rdx")
+        self.emit("movq %r13, %rcx")
+        self.emit("call fwrite")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_copy_fail_close")
+        self.emit("jmp vyl_copy_loop")
+        self.emit("vyl_copy_done:")
+        self.emit("movq %r12, %rdi")
+        self.emit("call fclose")
+        self.emit("movq %r13, %rdi")
+        self.emit("call fclose")
+        self.emit("movq $1, %rax")
+        self.emit("jmp vyl_copy_ret")
+        self.emit("vyl_copy_fail_close:")
+        self.emit("movq %r13, %rdi")
+        self.emit("call fclose")
+        self.emit("vyl_copy_close_src:")
+        self.emit("movq %r12, %rdi")
+        self.emit("call fclose")
+        self.emit("vyl_copy_fail:")
+        self.emit("movq $0, %rax")
+        self.emit("vyl_copy_ret:")
+        self.emit("addq $4112, %rsp")
+        self.emit("pop %r14")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_strconcat(s1, s2) -> new string s1+s2
+        self.emit(".globl vyl_strconcat")
+        self.emit("vyl_strconcat:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        self.emit("subq $8, %rsp")  # align to 16
+        self.emit("movq %rdi, %r12")  # s1
+        self.emit("movq %rsi, %r13")  # s2
+        # len1 = strlen(s1)
+        self.emit("call strlen")
+        self.emit("movq %rax, %rbx")
+        # len2 = strlen(s2)
+        self.emit("movq %r13, %rdi")
+        self.emit("call strlen")
+        # allocate len1 + len2 + 1
+        self.emit("addq %rbx, %rax")
+        self.emit("addq $1, %rax")
+        self.emit("movq %rax, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_strconcat_fail")
+        self.emit("movq %rax, %rbx")  # save result
+        # strcpy(result, s1)
+        self.emit("movq %rax, %rdi")
+        self.emit("movq %r12, %rsi")
+        self.emit("call strcpy")
+        # strcat(result, s2)
+        self.emit("movq %rbx, %rdi")
+        self.emit("movq %r13, %rsi")
+        self.emit("call strcat")
+        self.emit("movq %rbx, %rax")
+        self.emit("jmp vyl_strconcat_ret")
+        self.emit("vyl_strconcat_fail:")
+        self.emit("movq $0, %rax")
+        self.emit("vyl_strconcat_ret:")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_strfind(haystack, needle) -> index or -1
+        self.emit(".globl vyl_strfind")
+        self.emit("vyl_strfind:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("subq $8, %rsp")
+        self.emit("movq %rdi, %rbx")  # save haystack
+        # strstr(haystack, needle)
+        self.emit("call strstr")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_strfind_notfound")
+        # found: return offset = result - haystack
+        self.emit("subq %rbx, %rax")
+        self.emit("jmp vyl_strfind_ret")
+        self.emit("vyl_strfind_notfound:")
+        self.emit("movq $-1, %rax")
+        self.emit("vyl_strfind_ret:")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_substring(str, start, len) -> new string
+        self.emit(".globl vyl_substring")
+        self.emit("vyl_substring:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("push %r12")
+        self.emit("push %r13")
+        self.emit("subq $8, %rsp")
+        self.emit("movq %rdi, %r12")  # str
+        self.emit("movq %rsi, %r13")  # start
+        self.emit("movq %rdx, %rbx")  # len
+        # allocate len + 1
+        self.emit("movq %rbx, %rdi")
+        self.emit("addq $1, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_substring_fail")
+        self.emit("movq %rax, %rdi")  # dest
+        # src = str + start
+        self.emit("leaq (%r12,%r13,1), %rsi")
+        self.emit("movq %rbx, %rdx")  # n
+        self.emit("call memcpy")
+        # null terminate
+        self.emit("movb $0, (%rax,%rbx,1)")
+        self.emit("jmp vyl_substring_ret")
+        self.emit("vyl_substring_fail:")
+        self.emit("movq $0, %rax")
+        self.emit("vyl_substring_ret:")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %r13")
+        self.emit("pop %r12")
+        self.emit("pop %rbx")
+        self.emit("leave")
+        self.emit("ret")
 
 def generate_assembly(program: Program) -> str:
     generator = CodeGenerator()

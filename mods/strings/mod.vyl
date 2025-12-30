@@ -1,0 +1,28 @@
+// String utilities module for VYL
+
+Function StartsWith(str: string, prefix: string) -> int {
+    if (StrFind(str, prefix) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+Function EndsWith(str: string, suffix: string) -> int {
+    var int strLen = StrLen(str);
+    var int suffixLen = StrLen(suffix);
+    if (strLen < suffixLen) {
+        return 0;
+    }
+    var string end = Substring(str, strLen - suffixLen, suffixLen);
+    if (StrFind(end, suffix) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+Function Contains(str: string, search: string) -> int {
+    if (StrFind(str, search) >= 0) {
+        return 1;
+    }
+    return 0;
+}

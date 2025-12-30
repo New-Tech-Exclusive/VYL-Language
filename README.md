@@ -4,9 +4,9 @@ A Python-based compiler for the VYL language that emits x86-64 assembly and prod
 
 ## Highlights
 
-- **Language**: variables with optional types, functions with typed params/returns, `if/elif/else`, `while`, `for`, arithmetic/comparison ops, string concatenation, and includes (`include/import "file.vyl"`).
-- **Struct declarations**: `struct Point { var int x; var int y; }` are parsed/validated; runtime layout/codegen is currently a no-op (used as declarations only).
-- **Built-ins**: `Print`, `Clock`, `Exists`, `CreateFolder`, `Open`, `Read`, `Write`, `Close`, `SHA256`, `Sys`, `Argc`, `GetArg`, `ReadFilesize`, `Input`, `GC`.
+- **Language**: variables with optional types, typed function params/returns, `if/elif/else`, `while`, `for`, arithmetic/comparison ops, string concatenation, includes (`include/import "file.vyl"`).
+- **Struct declarations**: `struct Point { var int x; var int y; }` are parsed/validated; field layout and access remain declarative-only for now.
+- **Built-ins**: filesystem/process primitives, timing/randomness, and a full networking stack: TCP, TLS, `HttpGet`, `HttpDownload` (streaming to disk).
 - **CLI**: `vyl -c file.vyl` builds an executable (`file.vylo` by default), `-S` for assembly-only, `-k` for flat `.bin` via Keystone, `-cm` Mach-O object, `-cpe` PE/COFF object.
 - **Include preprocessor**: recursively inlines local `.vyl` files with cycle detection.
 
@@ -14,17 +14,19 @@ A Python-based compiler for the VYL language that emits x86-64 assembly and prod
 
 - Python 3.10+
 - `gcc` (Linux) or `clang` for assembling/linking; `x86_64-w64-mingw32-gcc` or a PE-capable `clang` for `-cpe`
-- OpenSSL libcrypto (for `SHA256` built-in)
+- OpenSSL libssl/libcrypto (for TLS/HTTP download and `SHA256` built-ins)
 - Optional: `keystone-engine` (`pip install keystone-engine`) when using `-k` to emit flat binaries
 
 ## Architecture
 
 ```
-vyl/
-├── __init__.py      # Package initialization
+new-compiler/
 ├── lexer.py         # Tokenization and lexical analysis
 ├── parser.py        # AST construction
-├── codegen.py       # Assembly generation
+├── resolver.py      # Declaration-before-use and scopes
+├── validator.py     # Semantic checks for identifiers
+├── type_checker.py  # Minimal static typing for expressions/returns
+├── codegen.py       # x86-64 assembly generation + runtime intrinsics
 └── main.py          # CLI interface
 ```
 
@@ -84,20 +86,51 @@ Function Main(argc, argv) {
 
 ## Built-in Functions
 
+**IO & filesystem**
 - `Print(any)`
-- `Clock()` → `int`
 - `Exists(path: string)` → `bool`
 - `CreateFolder(path: string)` → `int`
 - `Open(path: string, mode: string)` → `int`
+- `Close(fd: int)` → `int`
 - `Read(path: string)` → `string`
 - `Write(fd: int, data: string)` → `int`
-- `Close(fd: int)` → `int`
 - `ReadFilesize(path: string)` → `int`
-- `SHA256(data: string)` → `string`
+- `Remove(path: string)` → `int`
+
+**Process & environment**
+- `Argc()` → `int`
+- `GetArg(i: int)` → `string`
 - `Sys(cmd: string)` → `int`
-- `Argc()` → `int`, `GetArg(i: int)` → `string`
+- `Exit(code: int)`
 - `Input()` → `string`
 - `GC()`
+
+**Time & randomness**
+- `Clock()` → `int`
+- `Sleep(ms: int)` → `int`
+- `Now()` → `int` (Unix timestamp)
+- `RandInt()` → `int`
+
+**Crypto**
+- `SHA256(data: string)` → `string`
+
+**Arrays & math**
+- `Array(len: int)` → `array` (int elements, length stored)
+- `Length(arr: array)` → `int`
+- `Sqrt(n: int)` → `int` (integer floor sqrt)
+
+**Networking**
+- `TcpConnect(host: string, port: int)` → `int`
+- `TcpSend(fd: int, data: string)` → `int`
+- `TcpRecv(fd: int, max_bytes: int)` → `string`
+- `TcpClose(fd: int)` → `int`
+- `TcpResolve(host: string)` → `string` (IPv4 dotted quad)
+- `TlsConnect(host: string, port: int)` → `int`
+- `TlsSend(fd: int, data: string)` → `int`
+- `TlsRecv(fd: int, max_bytes: int)` → `string`
+- `TlsClose(fd: int)` → `int`
+- `HttpGet(host: string, path: string, use_tls: int)` → `string`
+- `HttpDownload(host: string, path: string, use_tls: int, dest_path: string)` → `int`
 
 ## Pipeline
 
@@ -111,9 +144,11 @@ Function Main(argc, argv) {
 
 ## Limitations / Notes
 
-- Structs are accepted syntactically but have no generated layout or field access yet.
-- No arrays, slices, or user-defined modules; includes inline files instead.
-- Linking uses `-lcrypto` for SHA256 on ELF; ensure OpenSSL is present.
+- Structs are declarations only; no field storage or access in codegen yet.
+- Arrays are int-only and bounds are unchecked.
+- No slices or user-defined modules; includes inline files instead.
+- Networking built-ins are blocking and assume IPv4 today.
+- TLS/HTTP depend on OpenSSL (`libssl`/`libcrypto`).
 
 ## License
 

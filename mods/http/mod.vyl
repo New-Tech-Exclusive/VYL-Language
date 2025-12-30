@@ -1,0 +1,10 @@
+// HTTP module for VYL
+// Simple wrapper around HttpDownload
+
+Function HttpGet(host: string, path: string, destFile: string) -> int {
+    return HttpDownload(host, path, 1, destFile);
+}
+
+Function HttpGetPlain(host: string, path: string, destFile: string) -> int {
+    return HttpDownload(host, path, 0, destFile);
+}

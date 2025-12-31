@@ -3,4 +3,3 @@ version=1.0.0
 author=VYL Team
 description=A simple hello world module
 dependencies=strings
-dependencies=strings

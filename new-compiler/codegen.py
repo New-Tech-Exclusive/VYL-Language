@@ -1359,7 +1359,7 @@ class CodeGenerator:
         self.emit(".section .data")
         self.emit("clock_counter: .quad 1")
         self.emit(".fmt_int: .asciz \"%ld\\n\"")
-        self.emit(".fmt_string: .asciz \"%s\\n\"")
+        self.emit(".fmt_string: .asciz \"%s\"")
         self.emit(".fmt_newline: .asciz \"\\n\"")
         self.emit("argc_store: .quad 0")
         self.emit("argv_store: .quad 0")
@@ -2595,11 +2595,11 @@ class CodeGenerator:
         self.emit("vyl_mkdir_p:")
         self.emit("push %rbp")
         self.emit("movq %rsp, %rbp")
-        self.emit("subq $280, %rsp")  # 256-byte buffer + alignment
-        self.emit("movq %rdi, %rsi")
-        self.emit("leaq -256(%rbp), %rdi")
-        self.emit("movq $256, %rdx")
-        self.emit("leaq .fmt_mkdirp(%rip), %rcx")
+        self.emit("subq $272, %rsp")  # 256-byte buffer + alignment (272 % 16 == 0)
+        self.emit("movq %rdi, %rcx")               # rcx = path (format arg)
+        self.emit("leaq -256(%rbp), %rdi")         # rdi = buffer
+        self.emit("movq $256, %rsi")               # rsi = size
+        self.emit("leaq .fmt_mkdirp(%rip), %rdx")  # rdx = format string
         self.emit("movq $0, %rax")
         self.emit("call snprintf")
         self.emit("leaq -256(%rbp), %rdi")

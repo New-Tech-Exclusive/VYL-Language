@@ -152,4 +152,4 @@ Function Main(argc, argv) {
 
 ## License
 
-MIT License
+Apache V2.0 License

@@ -1,4 +1,5 @@
 // String utilities module for VYL
+// mainly just made to test module dependencies
 
 Function StartsWith(str: string, prefix: string) -> int {
     if (StrFind(str, prefix) == 0) {

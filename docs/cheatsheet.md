@@ -76,7 +76,8 @@ Function <name>(<params>) [-> <return_type>] {
 
 | Area | Function | Return | Description |
 | :--- | :--- | :--- | :--- |
-| IO/FS | `Print(any)` | `void` | Print to stdout |
+| IO/FS 
+|  | `Print(any)` | `void` | Print to stdout |
 |  | `Exists(path)` | `bool` | Check if a path exists |
 |  | `CreateFolder(path)` | `int` | Make a directory |
 |  | `Open(path, mode)` | `int` | Open a file (fd) |
@@ -88,17 +89,21 @@ Function <name>(<params>) [-> <return_type>] {
 |  | `MkdirP(path)` | `int` | mkdir -p |
 |  | `RemoveAll(path)` | `int` | rm -rf |
 |  | `CopyFile(src, dst)` | `int` | Copy a file |
-| Process | `Argc()` / `GetArg(i)` | `int` / `string` | CLI args |
+| Process 
+|  | `Argc()` / `GetArg(i)` | `int` / `string` | CLI args |
 |  | `Sys(cmd)` | `int` | Run a shell command |
 |  | `Exit(code)` | `void` | Exit the process |
 |  | `Input()` | `string` | Read stdin line |
 |  | `GC()` | `void` | Trigger GC |
-| Time/Random | `Clock()` | `int` | Monotonic clock ticks |
+| Time/Random 
+|  | `Clock()` | `int` | Monotonic clock ticks |
 |  | `Sleep(ms)` | `int` | Sleep milliseconds |
 |  | `Now()` | `int` | Unix timestamp |
 |  | `RandInt()` | `int` | Random 64-bit int |
-| Crypto | `SHA256(data)` | `string` | SHA-256 hex digest |
-| Networking | `TcpConnect(host, port)` | `int` | Open TCP socket |
+| Crypto 
+|  | `SHA256(data)` | `string` | SHA-256 hex digest |
+| Networking 
+|  | `TcpConnect(host, port)` | `int` | Open TCP socket |
 |  | `TcpSend(fd, data)` | `int` | Send bytes |
 |  | `TcpRecv(fd, max_bytes)` | `string` | Receive bytes |
 |  | `TcpClose(fd)` | `int` | Close socket |
@@ -107,12 +112,15 @@ Function <name>(<params>) [-> <return_type>] {
 |  | `TlsSend(fd, data)` | `int` | Send TLS data |
 |  | `TlsRecv(fd, max_bytes)` | `string` | Receive TLS data |
 |  | `TlsClose(fd)` | `int` | Close TLS session |
-| HTTP | `HttpGet(host, path, use_tls)` | `string` | Fetch body |
+| HTTP 
+|  | `HttpGet(host, path, use_tls)` | `string` | Fetch body |
 |  | `HttpDownload(host, path, use_tls, dest)` | `int` | Stream to file |
-| Arrays/Math | `Array(len)` | `array` | Allocate int array |
+| Arrays/Math |
+|  | `Array(len)` | `array` | Allocate int array |
 |  | `Length(arr)` | `int` | Array length |
 |  | `Sqrt(n)` | `int` | Integer floor sqrt |
-| Manual mem | `Malloc(n)` | `int` | Allocate raw bytes |
+| Manual mem 
+|  | `Malloc(n)` | `int` | Allocate raw bytes |
 |  | `Free(ptr)` | `int` | Free raw pointer |
 |  | `Memcpy(dst, src, n)` | `int` | Copy bytes |
 |  | `Memset(ptr, val, n)` | `int` | Set bytes |

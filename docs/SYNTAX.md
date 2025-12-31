@@ -188,7 +188,7 @@ Function Fetch() {
 }
 ```
 
-## Language Limitations (v0.2.5)
+## Language Limitations (v0.2.3)
 
 - Structs are declarations only (no layout or field access in codegen yet).
 - Arrays are int-only; indexing is null/bounds-checked and aborts on violation.

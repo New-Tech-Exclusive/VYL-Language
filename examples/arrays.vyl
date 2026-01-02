@@ -1,14 +1,21 @@
 Function Main() {
-    var a0 = 10;
-    var a1 = 20;
-    var res = a0 + a1;
-    Print("a0 = ");
-    Print(a0);
+    var array nums = [10, 20, 30, 40, 50];
+    
+    Print("Element 0: ");
+    Print(nums[0]);
     Print("\n");
-    Print("a1 = ");
-    Print(a1);
+    
+    Print("Element 2: ");
+    Print(nums[2]);
     Print("\n");
-    Print("Sum = ");
-    Print(res);
+    
+    Print("Sum of first two: ");
+    Print(nums[0] + nums[1]);
+    Print("\n");
+    
+    // Modify an element
+    nums[1] = 100;
+    Print("After nums[1] = 100: ");
+    Print(nums[1]);
     Print("\n");
 }

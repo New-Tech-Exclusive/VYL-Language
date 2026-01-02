@@ -1,0 +1,117 @@
+// VYL Standard Library - Math Utilities
+// stdlib.math
+
+// Helper: modulo operation (a % b) since VYL doesn't have %
+Function mod(a: int, b: int) -> int {
+    return a - ((a / b) * b);
+}
+
+Function abs(x: int) -> int {
+    if (x < 0) {
+        return 0 - x;
+    }
+    return x;
+}
+
+Function min(a: int, b: int) -> int {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+Function max(a: int, b: int) -> int {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+Function clamp(value: int, minVal: int, maxVal: int) -> int {
+    if (value < minVal) {
+        return minVal;
+    }
+    if (value > maxVal) {
+        return maxVal;
+    }
+    return value;
+}
+
+Function pow(base: int, exp: int) -> int {
+    if (exp == 0) {
+        return 1;
+    }
+    var int result = 1;
+    var int i = 0;
+    while (i < exp) {
+        result = result * base;
+        i = i + 1;
+    }
+    return result;
+}
+
+Function factorial(n: int) -> int {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+Function gcd(a: int, b: int) -> int {
+    var int x = abs(a);
+    var int y = abs(b);
+    
+    while (y != 0) {
+        var int temp = y;
+        y = mod(x, y);
+        x = temp;
+    }
+    return x;
+}
+
+Function lcm(a: int, b: int) -> int {
+    if (a == 0) {
+        return 0;
+    }
+    if (b == 0) {
+        return 0;
+    }
+    return (a * b) / gcd(a, b);
+}
+
+Function isPrime(n: int) -> int {
+    if (n < 2) {
+        return 0;
+    }
+    if (n == 2) {
+        return 1;
+    }
+    if (mod(n, 2) == 0) {
+        return 0;
+    }
+    
+    var int i = 3;
+    while ((i * i) <= n) {
+        if (mod(n, i) == 0) {
+            return 0;
+        }
+        i = i + 2;
+    }
+    return 1;
+}
+
+Function isqrt(n: int) -> int {
+    if (n < 2) {
+        return n;
+    }
+    
+    var int x = n;
+    var int y = (x + 1) / 2;
+    
+    while (y < x) {
+        x = y;
+        y = (x + (n / x)) / 2;
+    }
+    
+    return x;
+}

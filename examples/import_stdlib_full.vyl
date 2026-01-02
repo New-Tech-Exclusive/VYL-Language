@@ -1,0 +1,24 @@
+// Test importing the full stdlib package
+import stdlib
+
+Function Main() -> int {
+    Print("Testing: import stdlib (full package)\n\n");
+    
+    // Using math functions
+    Print("abs(-100) = ");
+    Print(abs(-100));
+    Print("\n");
+    
+    // Using io functions
+    Print("fileExists('.') = ");
+    Print(fileExists("."));
+    Print("\n");
+    
+    // Using strings functions
+    Print("contains('test', 'es') = ");
+    Print(contains("test", "es"));
+    Print("\n");
+    
+    Print("\nFull stdlib import works!\n");
+    return 0;
+}

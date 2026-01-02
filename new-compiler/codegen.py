@@ -20,9 +20,25 @@ try:
         Literal,
         Identifier,
         ReturnStmt,
+        DeferStmt,
         StructDef,
         FieldAccess,
         IndexExpr,
+        NewExpr,
+        ArrayLiteral,
+        EnumDef,
+        EnumAccess,
+        MethodDef,
+        MethodCall,
+        SelfExpr,
+        AddressOf,
+        Dereference,
+        NullLiteral,
+        TupleLiteral,
+        TupleUnpack,
+        InterfaceDef,
+        InterpString,
+        TryExpr,
     )
 except ImportError:  # pragma: no cover - fallback for direct execution
     from parser import (
@@ -40,9 +56,25 @@ except ImportError:  # pragma: no cover - fallback for direct execution
         Literal,
         Identifier,
         ReturnStmt,
+        DeferStmt,
         StructDef,
         FieldAccess,
         IndexExpr,
+        NewExpr,
+        ArrayLiteral,
+        EnumDef,
+        EnumAccess,
+        MethodDef,
+        MethodCall,
+        SelfExpr,
+        AddressOf,
+        Dereference,
+        NullLiteral,
+        TupleLiteral,
+        TupleUnpack,
+        InterfaceDef,
+        InterpString,
+        TryExpr,
     )
 
 
@@ -66,11 +98,16 @@ class CodeGenerator:
         self.output: List[str] = []
         self.label_counter = 0
         self.current_function: Optional[str] = None
+        self.current_struct: Optional[StructDef] = None
+        self.current_function_end_label: Optional[str] = None  # For early returns (e.g., ? operator)
         self.locals: Dict[str, Symbol] = {}
         self.params: Dict[str, Symbol] = {}
         self.globals: Dict[str, Symbol] = {}
+        self.function_defs: Dict[str, FunctionDef] = {}  # Store function definitions for default params
         self.string_literals: List[Tuple[str, str]] = []
         self.struct_layouts: Dict[str, dict] = {}
+        self.enum_values: Dict[str, Dict[str, int]] = {}
+        self.defer_stack: List[DeferStmt] = []  # Stack of deferred statements
 
     # ---------- helpers ----------
     def emit(self, line: str):
@@ -104,6 +141,43 @@ class CodeGenerator:
             return f"{symbol.name}(%rip)"
         return f"{symbol.offset}(%rbp)"
 
+    def _infer_type_from_expr(self, expr) -> str:
+        """Infer the type of an expression for variable declarations."""
+        if isinstance(expr, Literal):
+            return expr.literal_type  # 'int', 'string', 'bool', 'dec'
+        if isinstance(expr, FunctionCall):
+            if expr.name in ("GetArg", "Read", "SHA256", "Input", "GetEnv", "StrConcat", "Substring"):
+                return "string"
+            return "int"  # Default for function calls
+        if isinstance(expr, BinaryExpr):
+            if expr.operator == "+":
+                left_t = self._infer_type_from_expr(expr.left)
+                right_t = self._infer_type_from_expr(expr.right)
+                if left_t == "string" or right_t == "string":
+                    return "string"
+                if left_t == "dec" or right_t == "dec":
+                    return "dec"
+                return "int"
+            if expr.operator in ("==", "!=", "<", ">", "<=", ">=", "&&", "||"):
+                return "bool"
+            return "int"
+        return "int"  # Default fallback
+
+    def _expr_is_stringish(self, node) -> bool:
+        """Check if an expression evaluates to a string type."""
+        if isinstance(node, Literal) and node.literal_type == "string":
+            return True
+        if isinstance(node, FunctionCall) and node.name in ("GetArg", "Read", "SHA256", "Input", "GetEnv", "StrConcat", "Substring"):
+            return True
+        if isinstance(node, Identifier):
+            sym = self.get_variable_symbol(node.name)
+            if sym and sym.typ == "string":
+                return True
+        if isinstance(node, BinaryExpr) and node.operator == "+":
+            # If either side is stringish, the result is stringish
+            return self._expr_is_stringish(node.left) or self._expr_is_stringish(node.right)
+        return False
+
     # ---------- entry ----------
     def generate(self, program: Program) -> str:
         self.output = []
@@ -111,9 +185,17 @@ class CodeGenerator:
         self.locals = {}
         self.params = {}
         self.globals = {}
+        self.function_defs = {}
         self.label_counter = 0
 
         self.struct_layouts = self.build_struct_layouts(program)
+        self.enum_values = self.build_enum_values(program)
+        self.method_table: Dict[str, Dict[str, MethodDef]] = self.build_method_table(program)
+
+        # Build function lookup table for default parameters
+        for stmt in program.statements:
+            if isinstance(stmt, FunctionDef):
+                self.function_defs[stmt.name] = stmt
 
         self.emit(".section .text")
 
@@ -122,6 +204,10 @@ class CodeGenerator:
                 self.process_global_var(stmt)
             elif isinstance(stmt, StructDef):
                 continue
+            elif isinstance(stmt, EnumDef):
+                continue
+            elif isinstance(stmt, InterfaceDef):
+                continue
 
         for stmt in program.statements:
             if isinstance(stmt, FunctionDef):
@@ -129,6 +215,12 @@ class CodeGenerator:
             elif isinstance(stmt, VarDecl):
                 continue
             elif isinstance(stmt, StructDef):
+                # Generate methods for the struct
+                for method in stmt.methods:
+                    self.generate_method(method, stmt)
+            elif isinstance(stmt, EnumDef):
+                continue
+            elif isinstance(stmt, InterfaceDef):
                 continue
             else:
                 self.generate_statement(stmt)
@@ -141,6 +233,10 @@ class CodeGenerator:
             for label, content in self.string_literals:
                 escaped = self.escape_string(content)
                 self.emit(f"{label}: .asciz \"{escaped}\"")
+
+        # Add format string for int-to-string conversion
+        self.emit(".section .data")
+        self.emit(".int_fmt: .asciz \"%ld\"")
 
         return "\n".join(self.output)
 
@@ -169,6 +265,7 @@ class CodeGenerator:
         self.current_function = func.name
         self.locals = {}
         self.params = {}
+        self.defer_stack = []  # Clear defer stack for new function
 
         # Collect locals
         decls = self.collect_var_decls(func.body) if func.body else []
@@ -208,7 +305,7 @@ class CodeGenerator:
 
         # Assign parameters (register-backed first, then stack-backed)
         offset_cursor = offset
-        for idx, (pname, ptype) in enumerate(func.params):
+        for idx, (pname, ptype, pdefault) in enumerate(func.params):
             if idx < reg_param_count:
                 sym = Symbol(pname, ptype or "int", False, 0, is_param=True, reg=param_reg_pool[idx])
                 self.locals[pname] = sym
@@ -220,7 +317,7 @@ class CodeGenerator:
                 offset_cursor += 8
 
         # Move incoming parameter values to their homes
-        for idx, (pname, _) in enumerate(func.params):
+        for idx, (pname, _, pdefault) in enumerate(func.params):
             sym = self.params[pname]
             if sym.reg:
                 if idx < len(arg_regs):
@@ -238,13 +335,20 @@ class CodeGenerator:
 
         # Assign locals after params
         for d in decls:
-            var_type = d.var_type or "int"
+            # Infer type from initializer if not explicitly specified
+            if d.var_type:
+                var_type = d.var_type
+            elif d.value:
+                var_type = self._infer_type_from_expr(d.value)
+            else:
+                var_type = "int"
             size = self.var_size(var_type)
             sym = Symbol(d.name, var_type, False, offset_cursor, size=size)
             self.locals[d.name] = sym
             offset_cursor += size
 
         end_lbl = self.get_label("ret")
+        self.current_function_end_label = end_lbl
 
         # Initialize struct locals so field access has storage
         for d in decls:
@@ -262,6 +366,8 @@ class CodeGenerator:
 
         if func.name == "Main":
             self.emit("movq $0, %rax")
+        # Execute any remaining deferred statements for implicit return
+        self._emit_deferred_statements()
         self.emit(f"{end_lbl}:")
         if stack_bytes:
             self.emit(f"addq ${stack_bytes}, %rsp")
@@ -270,6 +376,120 @@ class CodeGenerator:
         self.emit("leave")
         self.emit("ret")
         self.current_function = None
+
+    def generate_method(self, method: MethodDef, struct: StructDef):
+        """Generate code for a struct method. 'self' is passed as implicit first argument."""
+        method_name = f"{struct.name}_{method.name}"
+        self.current_function = method_name
+        self.current_struct = struct
+        self.locals = {}
+        self.params = {}
+        self.defer_stack = []  # Clear defer stack for new method
+
+        # Collect locals
+        decls = self.collect_var_decls(method.body) if method.body else []
+
+        # 'self' is the first argument (pointer to struct), then explicit params
+        all_params = [("self", struct.name)] + list(method.params)
+
+        arg_regs = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
+        param_reg_pool = ["%r14", "%r15", "%r13"]  # callee-saved to survive calls
+        reg_param_count = min(len(all_params), len(param_reg_pool))
+        saved_regs = param_reg_pool[:reg_param_count]
+
+        # Stack slots for non-register params + locals
+        total_slots = (len(all_params) - reg_param_count)
+        locals_size = sum(self.var_size(d.var_type or "int") for d in decls)
+        stack_bytes = total_slots * 8 + locals_size
+
+        saved_regs_bytes = len(saved_regs) * 8
+        total_frame = saved_regs_bytes + stack_bytes
+        if total_frame % 16 != 0:
+            stack_bytes += 8
+
+        offset = -stack_bytes if stack_bytes else 0
+
+        self.emit(f".globl {method_name}")
+        self.emit(f"{method_name}:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+
+        for reg in saved_regs:
+            self.emit(f"push {reg}")
+
+        if stack_bytes:
+            self.emit(f"subq ${stack_bytes}, %rsp")
+
+        # Assign parameters (register-backed first, then stack-backed)
+        offset_cursor = offset
+        for idx, (pname, ptype) in enumerate(all_params):
+            if idx < reg_param_count:
+                sym = Symbol(pname, ptype or "int", False, 0, is_param=True, reg=param_reg_pool[idx])
+                self.locals[pname] = sym
+                self.params[pname] = sym
+            else:
+                sym = Symbol(pname, ptype or "int", False, offset_cursor, is_param=True)
+                self.locals[pname] = sym
+                self.params[pname] = sym
+                offset_cursor += 8
+
+        # Move incoming parameter values to their homes
+        for idx, (pname, _) in enumerate(all_params):
+            sym = self.params[pname]
+            if sym.reg:
+                if idx < len(arg_regs):
+                    self.emit(f"movq {arg_regs[idx]}, {sym.reg}")
+                else:
+                    src_offset = 16 + (idx - len(arg_regs)) * 8
+                    self.emit(f"movq {src_offset}(%rbp), {sym.reg}")
+            else:
+                if idx < len(arg_regs):
+                    self.emit(f"movq {arg_regs[idx]}, {self.get_variable_location(sym)}")
+                else:
+                    src_offset = 16 + (idx - len(arg_regs)) * 8
+                    self.emit(f"movq {src_offset}(%rbp), %rax")
+                    self.emit(f"movq %rax, {self.get_variable_location(sym)}")
+
+        # Assign locals after params
+        for d in decls:
+            # Infer type from initializer if not explicitly specified
+            if d.var_type:
+                var_type = d.var_type
+            elif d.value:
+                var_type = self._infer_type_from_expr(d.value)
+            else:
+                var_type = "int"
+            size = self.var_size(var_type)
+            sym = Symbol(d.name, var_type, False, offset_cursor, size=size)
+            self.locals[d.name] = sym
+            offset_cursor += size
+
+        end_lbl = self.get_label("ret")
+        self.current_function_end_label = end_lbl
+
+        # Initialize struct locals
+        for d in decls:
+            var_type = d.var_type or "int"
+            if var_type in self.struct_layouts:
+                size = self.struct_layouts[var_type]["size"]
+                loc = self.get_variable_location(self.locals[d.name])
+                self.emit(f"movq ${size}, %rdi")
+                self.emit("call vyl_alloc")
+                self.emit(f"movq %rax, {loc}")
+
+        if method.body:
+            for stmt in method.body.statements:
+                self.generate_statement(stmt, end_label=end_lbl)
+
+        self.emit(f"{end_lbl}:")
+        if stack_bytes:
+            self.emit(f"addq ${stack_bytes}, %rsp")
+        for reg in reversed(saved_regs):
+            self.emit(f"pop {reg}")
+        self.emit("leave")
+        self.emit("ret")
+        self.current_function = None
+        self.current_struct = None
         self.locals = {}
         self.params = {}
 
@@ -303,6 +523,19 @@ class CodeGenerator:
             if stmt.value:
                 self.generate_expression(stmt.value)
                 self.emit(f"movq %rax, {self.get_variable_location(sym)}")
+        elif isinstance(stmt, TupleUnpack):
+            # Generate the tuple expression - tuple values are laid out on stack
+            self.generate_expression(stmt.value)
+            # %rax now points to the tuple base address
+            # Unpack each element into its corresponding variable
+            for i, name in enumerate(stmt.names):
+                sym = self.get_variable_symbol(name)
+                if not sym:
+                    raise CodegenError(f"Undefined local declaration for '{name}'")
+                # Each tuple element is 8 bytes
+                offset = i * 8
+                self.emit(f"movq {offset}(%rax), %rcx")
+                self.emit(f"movq %rcx, {self.get_variable_location(sym)}")
         elif isinstance(stmt, FunctionCall):
             self.generate_function_call(stmt)
         elif isinstance(stmt, IfStmt):
@@ -311,6 +544,9 @@ class CodeGenerator:
             self.generate_while(stmt, end_label=end_label)
         elif isinstance(stmt, ForStmt):
             self.generate_for(stmt, end_label=end_label)
+        elif isinstance(stmt, DeferStmt):
+            # Add defer to stack - will be executed when function returns
+            self.defer_stack.append(stmt)
         elif isinstance(stmt, Block):
             for s in stmt.statements:
                 self.generate_statement(s, end_label=end_label)
@@ -319,6 +555,8 @@ class CodeGenerator:
                 self.generate_expression(stmt.value)
             else:
                 self.emit("movq $0, %rax")
+            # Execute all deferred statements in LIFO order
+            self._emit_deferred_statements()
             if end_label:
                 self.emit(f"jmp {end_label}")
             else:
@@ -329,11 +567,32 @@ class CodeGenerator:
         else:
             self.generate_expression(stmt)
 
+    def _emit_deferred_statements(self):
+        """Emit all deferred statements in LIFO order, preserving return value."""
+        if not self.defer_stack:
+            return
+        # Save return value
+        self.emit("pushq %rax")
+        # Execute deferred statements in reverse order
+        for defer_stmt in reversed(self.defer_stack):
+            for stmt in defer_stmt.body.statements:
+                self.generate_statement(stmt)
+        # Restore return value
+        self.emit("popq %rax")
+
     def collect_var_decls(self, block: Block) -> List[VarDecl]:
+        """Collect VarDecl nodes and synthesize VarDecl for TupleUnpack names."""
         decls: List[VarDecl] = []
         for stmt in block.statements if block else []:
             if isinstance(stmt, VarDecl):
                 decls.append(stmt)
+            elif isinstance(stmt, TupleUnpack):
+                # Create synthetic VarDecl for each unpacked variable
+                for i, name in enumerate(stmt.names):
+                    var_type = stmt.types[i] if stmt.types[i] else "int"
+                    synthetic = VarDecl(name=name, var_type=var_type, is_mutable=True, value=None, 
+                                       line=stmt.line, column=stmt.column)
+                    decls.append(synthetic)
             elif isinstance(stmt, Block):
                 decls.extend(self.collect_var_decls(stmt))
             elif isinstance(stmt, IfStmt):
@@ -382,6 +641,16 @@ class CodeGenerator:
             return
 
         if isinstance(expr, FieldAccess):
+            # Check if this is an enum access (receiver is an identifier that names an enum)
+            if isinstance(expr.receiver, Identifier):
+                enum_name = expr.receiver.name
+                if enum_name in self.enum_values:
+                    variant = expr.field
+                    if variant not in self.enum_values[enum_name]:
+                        raise CodegenError(f"Unknown enum variant '{enum_name}.{variant}'")
+                    val = self.enum_values[enum_name][variant]
+                    self.emit(f"movq ${val}, %rax")
+                    return
             self.generate_address(expr, dest="%rax")
             self.emit("movq (%rax), %rax")
             return
@@ -412,6 +681,26 @@ class CodeGenerator:
 
         if isinstance(expr, FunctionCall):
             self.generate_function_call(expr)
+            return
+
+        if isinstance(expr, NewExpr):
+            self.generate_new_expr(expr)
+            return
+
+        if isinstance(expr, ArrayLiteral):
+            self.generate_array_literal(expr)
+            return
+
+        if isinstance(expr, TupleLiteral):
+            self.generate_tuple_literal(expr)
+            return
+
+        if isinstance(expr, InterpString):
+            self.generate_interp_string(expr)
+            return
+
+        if isinstance(expr, TryExpr):
+            self.generate_try_expr(expr)
             return
 
         if isinstance(expr, UnaryExpr):
@@ -460,38 +749,76 @@ class CodeGenerator:
                     return True
                 if isinstance(node, FunctionCall) and node.name in ("GetArg", "Read", "SHA256"):
                     return True
+                if isinstance(node, Identifier):
+                    sym = self.get_variable_symbol(node.name)
+                    if sym and sym.typ == "string":
+                        return True
+                if isinstance(node, BinaryExpr) and node.operator == "+":
+                    # Recursive check - if either side is stringish, result is stringish
+                    return _is_stringish(node.left) or _is_stringish(node.right)
                 return False
 
-            stringy = _is_stringish(expr.left) or _is_stringish(expr.right)
+            left_stringy = _is_stringish(expr.left)
+            right_stringy = _is_stringish(expr.right)
+            stringy = left_stringy or right_stringy
 
             if expr.operator == "+" and stringy:
-                # string concatenation: malloc(len(a)+len(b)+1), strcpy, strcat
+                # String concatenation with automatic int-to-string conversion
+                # Use callee-saved registers to preserve values across function calls
+                
+                # Helper to convert int in %rax to string, result in %rax
+                def emit_int_to_string():
+                    self.emit("movq %rax, %r14")  # save int value in callee-saved reg
+                    self.emit("movq $24, %rdi")
+                    self.emit("call vyl_alloc")
+                    self.emit("movq %rax, %r12")  # buffer in r12
+                    self.emit("movq %r12, %rdi")  # 1st arg: buffer
+                    self.emit("leaq .int_fmt(%rip), %rsi")  # 2nd arg: format
+                    self.emit("movq %r14, %rdx")  # 3rd arg: value
+                    self.emit("movq $0, %rax")  # no vector registers for sprintf
+                    self.emit("call sprintf")
+                    self.emit("movq %r12, %rax")  # result is buffer
+                
+                # Generate left, convert if needed
                 self.generate_expression(expr.left)
-                self.emit("push %rax")  # save left ptr
+                if not left_stringy:
+                    emit_int_to_string()
+                self.emit("movq %rax, %r15")  # save left string in r15 (callee-saved)
+                
+                # Generate right, convert if needed
                 self.generate_expression(expr.right)
-                self.emit("movq %rax, %rbx")  # right ptr
-                self.emit("pop %rdi")  # left ptr into rdi
-                self.emit("push %rdi")  # save left for later
-                self.emit("push %rbx")  # save right while strlen(left)
+                if not right_stringy:
+                    emit_int_to_string()
+                self.emit("movq %rax, %rbx")  # right string in rbx
+                
+                # Now concatenate: left in r15, right in rbx
+                # Get strlen of left
+                self.emit("movq %r15, %rdi")
                 self.emit("call strlen")
-                self.emit("movq %rax, %r12")  # len_left
-                self.emit("pop %rbx")  # restore right ptr
+                self.emit("movq %rax, %r14")  # len_left in r14
+                
+                # Get strlen of right
                 self.emit("movq %rbx, %rdi")
                 self.emit("call strlen")
-                self.emit("addq %r12, %rax")
-                self.emit("incq %rax")
+                self.emit("addq %r14, %rax")  # total length
+                self.emit("incq %rax")  # +1 for null terminator
+                
+                # Allocate destination buffer
                 self.emit("movq %rax, %rdi")
                 self.emit("call vyl_alloc")
-                self.emit("movq %rax, %r13")  # dest
+                self.emit("movq %rax, %r13")  # dest buffer in r13
+                
                 # strcpy(dest, left)
                 self.emit("movq %r13, %rdi")
-                self.emit("pop %rsi")  # left ptr
+                self.emit("movq %r15, %rsi")
                 self.emit("call strcpy")
+                
                 # strcat(dest, right)
                 self.emit("movq %r13, %rdi")
                 self.emit("movq %rbx, %rsi")
                 self.emit("call strcat")
-                self.emit("movq %r13, %rax")
+                
+                self.emit("movq %r13, %rax")  # return concatenated string
                 return
 
             if expr.operator in ("==", "!=") and stringy:
@@ -542,6 +869,43 @@ class CodeGenerator:
                 raise CodegenError(f"Unsupported binary operator '{op}'")
             return
 
+        if isinstance(expr, SelfExpr):
+            # 'self' is a pointer to the current struct, stored in locals
+            sym = self.get_variable_symbol("self")
+            if not sym:
+                raise CodegenError("'self' used outside of a method")
+            self.emit(f"movq {self.get_variable_location(sym)}, %rax")
+            return
+
+        if isinstance(expr, NullLiteral):
+            self.emit("movq $0, %rax")
+            return
+
+        if isinstance(expr, AddressOf):
+            # Get address of the operand
+            self.generate_address(expr.operand, dest="%rax")
+            return
+
+        if isinstance(expr, Dereference):
+            # Load value at pointer
+            self.generate_expression(expr.operand)
+            self.emit("movq (%rax), %rax")
+            return
+
+        if isinstance(expr, EnumAccess):
+            # Enums are compile-time constants
+            if expr.enum_name not in self.enum_values:
+                raise CodegenError(f"Unknown enum '{expr.enum_name}'")
+            if expr.variant not in self.enum_values[expr.enum_name]:
+                raise CodegenError(f"Unknown enum variant '{expr.enum_name}.{expr.variant}'")
+            val = self.enum_values[expr.enum_name][expr.variant]
+            self.emit(f"movq ${val}, %rax")
+            return
+
+        if isinstance(expr, MethodCall):
+            self.generate_method_call(expr)
+            return
+
         raise CodegenError(f"Unsupported expression type: {type(expr).__name__}")
 
     # ---------- address helpers ----------
@@ -556,6 +920,21 @@ class CodeGenerator:
                 return sym.typ
             self.emit(f"leaq {self.get_variable_location(sym)}, {dest}")
             return sym.typ
+        if isinstance(expr, SelfExpr):
+            # 'self' is a pointer to the current struct
+            sym = self.get_variable_symbol("self")
+            if not sym:
+                raise CodegenError("'self' used outside of a method")
+            self.emit(f"movq {self.get_variable_location(sym)}, {dest}")
+            return sym.typ
+        if isinstance(expr, Dereference):
+            # *ptr - evaluate pointer, the result is the address we want
+            self.generate_expression(expr.operand)
+            if dest != "%rax":
+                self.emit(f"movq %rax, {dest}")
+            # Return type without the leading *
+            # We'd need type info here, for now just return "int"
+            return "int"
         if isinstance(expr, FieldAccess):
             recv_type = self.generate_address(expr.receiver, dest=dest, want_struct_data=True)
             layout = self.struct_layouts.get(recv_type)
@@ -615,6 +994,29 @@ class CodeGenerator:
             layouts[stmt.name] = {"size": size, "fields": fields}
         return layouts
 
+    def build_enum_values(self, program: Program) -> Dict[str, Dict[str, int]]:
+        """Build a mapping of EnumName -> {VARIANT: value}"""
+        enums: Dict[str, Dict[str, int]] = {}
+        for stmt in program.statements:
+            if not isinstance(stmt, EnumDef):
+                continue
+            variants: Dict[str, int] = {}
+            for name, value in stmt.variants:
+                variants[name] = value
+            enums[stmt.name] = variants
+        return enums
+
+    def build_method_table(self, program: Program) -> Dict[str, Dict[str, MethodDef]]:
+        """Build a mapping of StructName -> {method_name: MethodDef}"""
+        methods: Dict[str, Dict[str, MethodDef]] = {}
+        for stmt in program.statements:
+            if not isinstance(stmt, StructDef):
+                continue
+            methods[stmt.name] = {}
+            for method in stmt.methods:
+                methods[stmt.name][method.name] = method
+        return methods
+
     # ---------- assignments ----------
     def generate_assignment(self, assign: Assignment):
         self.generate_expression(assign.value)
@@ -630,6 +1032,215 @@ class CodeGenerator:
         else:
             raise CodegenError(f"Undefined variable '{assign.name}'")
 
+    # ---------- struct instantiation ----------
+    def generate_new_expr(self, expr: NewExpr):
+        """Generate code for new StructName or new StructName{field: value, ...}"""
+        layout = self.struct_layouts.get(expr.struct_name)
+        if not layout:
+            raise CodegenError(f"Unknown struct type '{expr.struct_name}'")
+        size = layout["size"]
+        
+        # Allocate memory for struct
+        self.emit(f"movq ${size}, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("movq %rax, %r12")  # save struct pointer
+        
+        # Zero-initialize all fields
+        for i in range(size // 8):
+            self.emit(f"movq $0, {i * 8}(%r12)")
+        
+        # Apply initializers
+        for field_name, value in expr.initializers:
+            field_info = layout["fields"].get(field_name)
+            if not field_info:
+                raise CodegenError(f"Unknown field '{field_name}' on struct '{expr.struct_name}'")
+            field_type, offset = field_info
+            
+            self.emit("push %r12")  # save struct pointer
+            self.generate_expression(value)
+            self.emit("pop %r12")  # restore struct pointer
+            self.emit(f"movq %rax, {offset}(%r12)")
+        
+        self.emit("movq %r12, %rax")  # return struct pointer
+
+    # ---------- array literals ----------
+    def generate_array_literal(self, expr: ArrayLiteral):
+        """Generate code for [expr1, expr2, ...]"""
+        num_elements = len(expr.elements)
+        
+        # Allocate: 8 bytes for length + 8 bytes per element
+        total_size = 8 + (num_elements * 8)
+        self.emit(f"movq ${total_size}, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("movq %rax, %r12")  # save array pointer
+        
+        # Store length at offset 0
+        self.emit(f"movq ${num_elements}, (%r12)")
+        
+        # Evaluate and store each element
+        for i, elem in enumerate(expr.elements):
+            self.emit("push %r12")  # save array pointer
+            self.generate_expression(elem)
+            self.emit("pop %r12")  # restore array pointer
+            offset = 8 + (i * 8)  # skip length field
+            self.emit(f"movq %rax, {offset}(%r12)")
+        
+        # Return pointer to first element (skip length)
+        self.emit("addq $8, %r12")
+        self.emit("movq %r12, %rax")
+
+    def generate_tuple_literal(self, expr: TupleLiteral):
+        """Generate code for (expr1, expr2, ...)"""
+        num_elements = len(expr.elements)
+        
+        # Allocate: 8 bytes per element
+        total_size = num_elements * 8
+        self.emit(f"movq ${total_size}, %rdi")
+        self.emit("call vyl_alloc")
+        self.emit("movq %rax, %r12")  # save tuple pointer
+        
+        # Evaluate and store each element
+        for i, elem in enumerate(expr.elements):
+            self.emit("push %r12")  # save tuple pointer
+            self.generate_expression(elem)
+            self.emit("pop %r12")  # restore tuple pointer
+            offset = i * 8
+            self.emit(f"movq %rax, {offset}(%r12)")
+        
+        # Return pointer to tuple
+        self.emit("movq %r12, %rax")
+
+    def generate_interp_string(self, expr: InterpString):
+        """Generate code for interpolated string: "Hello {name}!"
+        
+        The approach is to build the string by:
+        1. For each part, generate either a string literal or convert expression to string
+        2. Concatenate all parts together using vyl_strconcat
+        """
+        # Import lexer and parser for parsing embedded expressions
+        try:
+            from .lexer import tokenize
+            from .parser import Parser
+        except ImportError:
+            from lexer import tokenize
+            from parser import Parser
+        
+        parts = expr.parts
+        
+        if not parts:
+            # Empty string
+            label = self.get_label(".str")
+            self.string_literals.append((label, ""))
+            self.emit(f"leaq {label}(%rip), %rax")
+            return
+        
+        # Helper to convert int in %rax to string, result in %rax
+        # Uses rbx (callee-saved) to preserve values across calls
+        def emit_int_to_string():
+            self.emit("push %rbx")  # save rbx
+            self.emit("movq %rax, %rbx")  # save int value
+            self.emit("subq $8, %rsp")  # align stack to 16 bytes
+            self.emit("movq $24, %rdi")
+            self.emit("call vyl_alloc")
+            self.emit("push %rax")  # save buffer pointer
+            self.emit("movq %rax, %rdi")  # 1st arg: buffer
+            self.emit("leaq .int_fmt(%rip), %rsi")  # 2nd arg: format
+            self.emit("movq %rbx, %rdx")  # 3rd arg: value
+            self.emit("movq $0, %rax")  # no vector registers for sprintf
+            self.emit("call sprintf")
+            self.emit("pop %rax")  # result is buffer
+            self.emit("addq $8, %rsp")  # remove alignment padding
+            self.emit("pop %rbx")  # restore rbx
+        
+        def is_stringish_expr(node):
+            """Check if expression result is a string."""
+            if isinstance(node, Literal) and node.literal_type == "string":
+                return True
+            if isinstance(node, FunctionCall) and node.name in ("GetArg", "Read", "SHA256", "Input", "GetEnv", "StrConcat", "Substring"):
+                return True
+            if isinstance(node, Identifier):
+                sym = self.get_variable_symbol(node.name)
+                if sym and sym.typ == "string":
+                    return True
+            if isinstance(node, InterpString):
+                return True
+            return False
+        
+        # Generate first part
+        is_expr, value = parts[0]
+        if is_expr:
+            # Parse and generate the expression
+            tokens = tokenize(value)
+            parser = Parser(tokens)
+            ast_expr = parser.parse_expression()
+            self.generate_expression(ast_expr)
+            if not is_stringish_expr(ast_expr):
+                emit_int_to_string()
+        else:
+            # String literal
+            label = self.get_label(".str")
+            self.string_literals.append((label, value))
+            self.emit(f"leaq {label}(%rip), %rax")
+        
+        # If only one part, we're done
+        if len(parts) == 1:
+            return
+        
+        # Save result and concatenate with remaining parts
+        self.emit("push %rax")  # Save accumulated string
+        
+        for is_expr, value in parts[1:]:
+            # Generate next part
+            if is_expr:
+                tokens = tokenize(value)
+                parser = Parser(tokens)
+                ast_expr = parser.parse_expression()
+                self.generate_expression(ast_expr)
+                if not is_stringish_expr(ast_expr):
+                    emit_int_to_string()
+            else:
+                label = self.get_label(".str")
+                self.string_literals.append((label, value))
+                self.emit(f"leaq {label}(%rip), %rax")
+            
+            # Concatenate: pop left, right is in rax
+            self.emit("movq %rax, %rsi")  # right
+            self.emit("pop %rdi")  # left
+            self.emit("call vyl_strconcat")
+            self.emit("push %rax")  # Save result for next iteration
+        
+        # Final result is on stack
+        self.emit("pop %rax")
+
+    def generate_try_expr(self, expr: TryExpr):
+        """Generate code for error propagation: expr?
+        
+        If the operand evaluates to < 0, return early with that value.
+        Otherwise, continue with the value.
+        """
+        # Evaluate the operand
+        self.generate_expression(expr.operand)
+        
+        # Check if result is < 0 (error condition)
+        ok_label = self.get_label("try_ok")
+        self.emit("cmpq $0, %rax")
+        self.emit(f"jge {ok_label}")  # Jump if >= 0 (success)
+        
+        # Error path: execute deferred statements and jump to function epilogue
+        self._emit_deferred_statements()
+        
+        # Jump to the function's return label which handles proper stack cleanup
+        if self.current_function_end_label:
+            self.emit(f"jmp {self.current_function_end_label}")
+        else:
+            # Fallback: direct return (shouldn't happen in practice)
+            self.emit("leave")
+            self.emit("ret")
+        
+        # Success path: continue with the value
+        self.emit(f"{ok_label}:")
+        # Value is already in %rax
+
     # ---------- calls ----------
     def generate_function_call(self, call: FunctionCall):
         name = call.name
@@ -638,6 +1249,8 @@ class CodeGenerator:
                 arg = call.arguments[0]
                 self.generate_expression(arg)
                 stringy = isinstance(arg, Literal) and arg.literal_type == "string"
+                if isinstance(arg, InterpString):
+                    stringy = True
                 if isinstance(arg, FunctionCall) and arg.name in ("GetArg", "Read", "SHA256", "Input", "GetEnv", "StrConcat", "Substring"):
                     stringy = True
                 # Check if it's a variable reference of type string
@@ -645,8 +1258,27 @@ class CodeGenerator:
                     sym = self.get_variable_symbol(arg.name)
                     if sym and sym.typ == "string":
                         stringy = True
+                # Check if it's indexing a string array
+                if isinstance(arg, IndexExpr):
+                    if isinstance(arg.receiver, Identifier):
+                        sym = self.get_variable_symbol(arg.receiver.name)
+                        if sym and sym.typ in ("string[]", "array"):
+                            # Check if it's a string array by inspecting element type
+                            if sym.typ == "string[]":
+                                stringy = True
+                # Check if it's a string concatenation expression
+                if isinstance(arg, BinaryExpr) and arg.operator == "+":
+                    stringy = self._expr_is_stringish(arg)
                 self.emit("movq %rax, %rdi")
                 self.emit("call print_string" if stringy else "call print_int")
+            return
+
+        if name == "Len":
+            if len(call.arguments) != 1:
+                raise CodegenError("Len expects (array)")
+            self.generate_expression(call.arguments[0])
+            # Array pointer points to first element, length is at -8
+            self.emit("movq -8(%rax), %rax")
             return
 
         if name == "Exists":
@@ -870,6 +1502,30 @@ class CodeGenerator:
             self.emit("call vyl_remove_all")
             return
 
+        if name == "OpenDir":
+            if len(call.arguments) != 1:
+                raise CodegenError("OpenDir expects (path)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call opendir")
+            return
+
+        if name == "ReadDir":
+            if len(call.arguments) != 1:
+                raise CodegenError("ReadDir expects (dirHandle)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_readdir")
+            return
+
+        if name == "CloseDir":
+            if len(call.arguments) != 1:
+                raise CodegenError("CloseDir expects (dirHandle)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call closedir")
+            return
+
         if name == "CopyFile":
             if len(call.arguments) != 2:
                 raise CodegenError("CopyFile expects (src, dst)")
@@ -936,10 +1592,20 @@ class CodeGenerator:
             self.emit("call malloc")
             return
 
+        if name == "Alloc":
+            if len(call.arguments) != 1:
+                raise CodegenError("Alloc expects (size)")
+            self.generate_expression(call.arguments[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call vyl_alloc")
+            return
+
         if name == "Free":
             if len(call.arguments) != 1:
                 raise CodegenError("Free expects (ptr)")
             self.generate_expression(call.arguments[0])
+            # vyl_alloc returns ptr+24, so we need to subtract 24 to get original malloc ptr
+            self.emit("subq $24, %rax")
             self.emit("movq %rax, %rdi")
             self.emit("call free")
             self.emit("movq $0, %rax")
@@ -1167,9 +1833,20 @@ class CodeGenerator:
 
         # generic call using SysV registers for first 6 args
         arg_regs = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
-        arg_count = len(call.arguments)
+        
+        # Build full argument list with defaults filled in
+        full_args: List = list(call.arguments)
+        if name in self.function_defs:
+            func_def = self.function_defs[name]
+            # Fill in missing arguments with defaults
+            for i in range(len(call.arguments), len(func_def.params)):
+                _, _, default = func_def.params[i]
+                if default is not None:
+                    full_args.append(default)
+        
+        arg_count = len(full_args)
         # Evaluate args right-to-left, push on stack
-        for arg in reversed(call.arguments):
+        for arg in reversed(full_args):
             self.generate_expression(arg)
             self.emit("push %rax")
         # Pop into registers in order
@@ -1180,6 +1857,48 @@ class CodeGenerator:
             excess = arg_count - len(arg_regs)
             self.emit(f"addq ${excess * 8}, %rsp")
         self.emit(f"call {name}")
+
+    def generate_method_call(self, call: MethodCall):
+        """Generate code for a method call: receiver.method(args)
+        The receiver becomes the implicit 'self' first argument."""
+        # Determine struct name from receiver
+        receiver = call.receiver
+        struct_name = None
+        if isinstance(receiver, Identifier):
+            sym = self.get_variable_symbol(receiver.name)
+            if sym:
+                struct_name = sym.typ
+        elif isinstance(receiver, SelfExpr):
+            if self.current_struct:
+                struct_name = self.current_struct.name
+        elif isinstance(receiver, FieldAccess):
+            # Need to figure out type from field access - for now just try looking up method
+            pass
+
+        method_name = f"{struct_name}_{call.method_name}" if struct_name else call.method_name
+
+        # SysV calling convention: rdi, rsi, rdx, rcx, r8, r9
+        arg_regs = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"]
+
+        # Total args = self + explicit args
+        all_args = [receiver] + list(call.arguments)
+        arg_count = len(all_args)
+
+        # Evaluate args right-to-left, push on stack
+        for arg in reversed(all_args):
+            self.generate_expression(arg)
+            self.emit("push %rax")
+
+        # Pop into registers in order
+        for idx in range(min(arg_count, len(arg_regs))):
+            self.emit(f"pop {arg_regs[idx]}")
+
+        # Remove any remaining stack args beyond 6
+        if arg_count > len(arg_regs):
+            excess = arg_count - len(arg_regs)
+            self.emit(f"addq ${excess * 8}, %rsp")
+
+        self.emit(f"call {method_name}")
 
     # ---------- control flow ----------
     def generate_if(self, node: IfStmt, end_label: Optional[str] = None):
@@ -2629,6 +3348,47 @@ class CodeGenerator:
         self.emit("sete %al")
         self.emit("movzbq %al, %rax")
         self.emit("addq $272, %rsp")
+        self.emit("leave")
+        self.emit("ret")
+
+        # vyl_readdir(dir) -> string (entry name, or empty string if done)
+        # Returns d_name field from struct dirent
+        self.emit(".globl vyl_readdir")
+        self.emit("vyl_readdir:")
+        self.emit("push %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("push %rbx")
+        self.emit("subq $8, %rsp")  # Maintain 16-byte alignment (8 + 8 = 16)
+        self.emit("movq %rdi, %rbx")  # Save dir handle
+        self.emit("call readdir")     # Returns struct dirent*
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_readdir_done")
+        # struct dirent has d_name at offset 19 (on x86-64 Linux)
+        self.emit("addq $19, %rax")   # Point to d_name
+        # Skip "." and ".." entries
+        self.emit("movb (%rax), %cl")
+        self.emit("cmpb $'.', %cl")
+        self.emit("jne vyl_readdir_ret")
+        self.emit("movb 1(%rax), %cl")
+        self.emit("cmpb $0, %cl")
+        self.emit("je vyl_readdir_next")  # "." entry
+        self.emit("cmpb $'.', %cl")
+        self.emit("jne vyl_readdir_ret")
+        self.emit("movb 2(%rax), %cl")
+        self.emit("cmpb $0, %cl")
+        self.emit("jne vyl_readdir_ret")  # Not ".."
+        self.emit("vyl_readdir_next:")
+        self.emit("movq %rbx, %rdi")
+        self.emit("call readdir")
+        self.emit("cmpq $0, %rax")
+        self.emit("je vyl_readdir_done")
+        self.emit("addq $19, %rax")
+        self.emit("jmp vyl_readdir_ret")
+        self.emit("vyl_readdir_done:")
+        self.emit("leaq .empty_str(%rip), %rax")
+        self.emit("vyl_readdir_ret:")
+        self.emit("addq $8, %rsp")
+        self.emit("pop %rbx")
         self.emit("leave")
         self.emit("ret")
 

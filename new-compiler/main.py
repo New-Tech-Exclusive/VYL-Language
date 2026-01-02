@@ -33,6 +33,7 @@ try:
     from .type_checker import type_check
     from .validator import validate_program, ValidationError
     from .codegen import generate_assembly, CodegenError
+    from .generics import instantiate_generics
 except ImportError:
     # Running as standalone script
     if __name__ == '__main__' and __package__ is None:
@@ -44,15 +45,41 @@ except ImportError:
         from type_checker import type_check
         from validator import validate_program, ValidationError
         from codegen import generate_assembly, CodegenError
+        from generics import instantiate_generics
     else:
         raise
 
 
 INCLUDE_PATTERN = re.compile(r'^\s*include\s+"([^"]+)"\s*;?\s*$')
 IMPORT_PATTERN = re.compile(r'^\s*import\s+"([^"]+)"\s*;?\s*$')
+# Dotted import pattern: import stdlib.io or import stdlib.io.utils
+IMPORT_DOTTED_PATTERN = re.compile(r'^\s*import\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+)\s*;?\s*$')
+# Simple module import: import stdlib
+IMPORT_SIMPLE_PATTERN = re.compile(r'^\s*import\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;?\s*$')
 
 # Global modules directory
 VYL_MODULES_DIR = Path.home() / ".vyl" / "modules"
+
+
+def resolve_module_path(module_spec: str) -> Path:
+    """Resolve a module specification to a file path.
+    
+    Examples:
+        "stdlib" -> ~/.vyl/modules/stdlib/mod.vyl
+        "stdlib.io" -> ~/.vyl/modules/stdlib/io.vyl
+        "stdlib.io.utils" -> ~/.vyl/modules/stdlib/io/utils.vyl
+    """
+    parts = module_spec.split('.')
+    base_module = parts[0]
+    
+    if len(parts) == 1:
+        # Simple import: import stdlib -> stdlib/mod.vyl
+        return VYL_MODULES_DIR / base_module / "mod.vyl"
+    else:
+        # Dotted import: import stdlib.io -> stdlib/io.vyl
+        # import stdlib.io.utils -> stdlib/io/utils.vyl
+        subpath = '/'.join(parts[1:])
+        return VYL_MODULES_DIR / base_module / f"{subpath}.vyl"
 
 
 def preprocess_includes(source_code: str, base_dir: Path, seen: set[Path]) -> str:
@@ -60,10 +87,51 @@ def preprocess_includes(source_code: str, base_dir: Path, seen: set[Path]) -> st
     
     - include "path.vyl" -> relative to current file's directory
     - import "name" -> looks up ~/.vyl/modules/<name>/mod.vyl
+    - import stdlib.io -> looks up ~/.vyl/modules/stdlib/io.vyl
     """
     result = []
     for line in source_code.splitlines():
-        # Check for import first (global modules)
+        # Check for dotted import first: import stdlib.io
+        dotted_match = IMPORT_DOTTED_PATTERN.match(line)
+        if dotted_match:
+            module_spec = dotted_match.group(1)
+            module_path = resolve_module_path(module_spec).resolve()
+            if module_path in seen:
+                raise SyntaxError(f"Cyclic import detected for module '{module_spec}'")
+            if not module_path.exists():
+                # Provide helpful error message
+                parts = module_spec.split('.')
+                raise FileNotFoundError(
+                    f"Module '{module_spec}' not found. Expected: {module_path}\n"
+                    f"Install with: vpm install {parts[0]}"
+                )
+            seen.add(module_path)
+            module_text = module_path.read_text()
+            result.append(f"// begin import {module_spec}")
+            result.append(preprocess_includes(module_text, module_path.parent, seen))
+            result.append(f"// end import {module_spec}")
+            continue
+        
+        # Check for simple module import: import stdlib
+        simple_match = IMPORT_SIMPLE_PATTERN.match(line)
+        if simple_match:
+            module_name = simple_match.group(1)
+            module_path = resolve_module_path(module_name).resolve()
+            if module_path in seen:
+                raise SyntaxError(f"Cyclic import detected for module '{module_name}'")
+            if not module_path.exists():
+                raise FileNotFoundError(
+                    f"Module '{module_name}' not found. Expected: {module_path}\n"
+                    f"Install with: vpm install {module_name}"
+                )
+            seen.add(module_path)
+            module_text = module_path.read_text()
+            result.append(f"// begin import {module_name}")
+            result.append(preprocess_includes(module_text, module_path.parent, seen))
+            result.append(f"// end import {module_name}")
+            continue
+        
+        # Check for quoted import: import "name" (legacy)
         import_match = IMPORT_PATTERN.match(line)
         if import_match:
             module_name = import_match.group(1)
@@ -145,18 +213,23 @@ def compile_vyl(source_code: str, output_file: str, generate_assembly_only: bool
         ast = parse(tokens)
         print("  AST generated successfully")
         
-        # Step 2.5: Resolve symbols / basic semantics
-        print("Step 2a: Resolving symbols...")
+        # Step 2a: Instantiate generics (monomorphization)
+        print("Step 2a: Instantiating generics...")
+        ast = instantiate_generics(ast)
+        print("  Generics instantiated")
+        
+        # Step 2b: Resolve symbols / basic semantics
+        print("Step 2b: Resolving symbols...")
         resolve_program(ast)
         print("  Resolution passed")
 
-        # Step 2.6: Type checking
-        print("Step 2b: Type checking...")
+        # Step 2c: Type checking
+        print("Step 2c: Type checking...")
         type_check(ast)
         print("  Type checking passed")
 
-        # Step 2.7: Additional validation (legacy checks)
-        print("Step 2c: Validating AST...")
+        # Step 2d: Additional validation (legacy checks)
+        print("Step 2d: Validating AST...")
         validate_program(ast)
         print("  Validation passed")
 

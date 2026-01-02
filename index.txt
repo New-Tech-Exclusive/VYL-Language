@@ -1,0 +1,4 @@
+hello - A simple hello world module
+http - HTTP client for making web requests  
+strings - String manipulation utilities
+stdlib - Standard library with math, io, and string functions

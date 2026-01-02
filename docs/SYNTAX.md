@@ -31,7 +31,78 @@ struct Point {
     var int y;
 }
 ```
-Structs are currently used for data organization and are handled by the parser and validator.
+Structs are used for data organization with field access and memory allocation.
+
+#### Struct Instantiation
+```vyl
+var Point p = new Point{x: 10, y: 20};
+Print(p.x);  // 10
+Print(p.y);  // 20
+```
+
+#### Struct Methods
+Structs can have methods that operate on their data using `self`:
+```vyl
+Struct Point {
+    var int x;
+    var int y;
+    
+    Function sum() -> int {
+        Return self.x + self.y;
+    }
+    
+    Function scale(factor: int) {
+        self.x = self.x * factor;
+        self.y = self.y * factor;
+    }
+}
+
+Main() {
+    var Point p = new Point{x: 5, y: 10};
+    Print(p.sum());   // 15
+    p.scale(2);
+    Print(p.x);       // 10
+}
+```
+
+### Enums
+Enums define named constants with optional explicit values:
+```vyl
+Enum Status {
+    OK,           // 0 (auto-assigned)
+    ERROR = 10,   // 10 (explicit)
+    PENDING       // 11 (auto-incremented)
+}
+
+Enum Color {
+    RED = 1,
+    GREEN = 2,
+    BLUE = 4
+}
+
+Main() {
+    var int s = Status.OK;     // 0
+    var int e = Status.ERROR;  // 10
+    var int c = Color.RED;     // 1
+}
+```
+
+### Pointers and References
+VYL supports pointers for low-level memory manipulation:
+```vyl
+Main() {
+    var int value = 42;
+    var *int ptr = &value;    // Get address of value
+    Print(*ptr);              // Dereference: prints 42
+    
+    *ptr = 100;               // Assign through pointer
+    Print(value);             // Now prints 100
+}
+```
+
+- `&variable` - Get address of a variable (address-of operator)
+- `*pointer` - Dereference a pointer to access/modify the value
+- `*type` - Pointer type annotation (e.g., `*int`, `*string`)
 
 ## Operators
 
@@ -102,6 +173,37 @@ Function Main(argc, argv) {
 }
 ```
 `Main` can optionally take `argc` and `argv`.
+
+### Multiple Return Values (Tuples)
+Functions can return multiple values using tuple syntax:
+```vyl
+Function divmod(a: int, b: int) -> (int, int) {
+    var quotient = a / b;
+    var remainder = a - (quotient * b);
+    return (quotient, remainder);
+}
+
+Function minmax(a: int, b: int) -> (int, int) {
+    if (a < b) {
+        return (a, b);
+    } else {
+        return (b, a);
+    }
+}
+
+Function Main() {
+    // Unpack tuple into separate variables
+    var q, r = divmod(17, 5);
+    Print(q);  // 3
+    Print(r);  // 2
+    
+    // Direct tuple literal
+    var x, y = (100, 200);
+    
+    // Call returning tuple
+    var min, max = minmax(42, 13);
+}
+```
 
 ## Built-in Functions
 
@@ -188,13 +290,13 @@ Function Fetch() {
 }
 ```
 
-## Language Limitations (v0.2.3)
+## Language Limitations (v0.2.4)
 
-- Structs are declarations only (no layout or field access in codegen yet).
 - Arrays are int-only; indexing is null/bounds-checked and aborts on violation.
 - Includes inline files; no modules/packages yet.
 - Networking is blocking and IPv4-focused.
 - No exception handling or operator overloading.
+- Pointer arithmetic not yet supported.
 
 ## Style Guide
 

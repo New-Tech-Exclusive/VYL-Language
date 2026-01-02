@@ -44,6 +44,13 @@ KEYWORDS = {
     'for': 'FOR',
     'in': 'IN',
     'struct': 'STRUCT',
+    'Struct': 'STRUCT',
+    'enum': 'ENUM',
+    'Enum': 'ENUM',
+    'interface': 'INTERFACE',
+    'Interface': 'INTERFACE',
+    'defer': 'DEFER',
+    'Defer': 'DEFER',
     'new': 'NEW',
     'import': 'IMPORT',
     'function': 'FUNCTION',
@@ -61,6 +68,8 @@ KEYWORDS = {
     'false': 'FALSE',
     'let': 'LET',
     'mut': 'MUT',
+    'self': 'SELF',
+    'null': 'NULL',
 }
 
 
@@ -138,15 +147,19 @@ class Lexer:
             while self.position < self.length and self.peek() != '\n':
                 self.advance()
     
-    def scan_string(self) -> str:
+    def scan_string(self) -> tuple:
         """
-        Scan a string literal with escape sequence support
+        Scan a string literal with escape sequence and interpolation support
         
         Returns:
-            The decoded string content
+            Tuple of (has_interpolation, content)
+            If has_interpolation is True, content is a list of (is_expr, value) tuples
+            If has_interpolation is False, content is the decoded string
         """
         self.advance()  # Skip opening quote
         result = []
+        parts = []  # For interpolated strings: list of (is_expr, value)
+        has_interpolation = False
         
         while self.position < self.length:
             char = self.peek()
@@ -167,14 +180,54 @@ class Lexer:
                     result.append('\r')
                 elif escape_char == '"':
                     result.append('"')
+                elif escape_char == '{':
+                    result.append('{')  # Escaped brace - literal
+                elif escape_char == '}':
+                    result.append('}')  # Escaped brace - literal
                 else:
                     result.append(escape_char)
                 self.advance()
+            elif char == '{':
+                # Start of interpolation
+                has_interpolation = True
+                # Save accumulated literal text
+                if result:
+                    parts.append((False, ''.join(result)))
+                    result = []
+                
+                self.advance()  # Skip {
+                
+                # Scan the expression (identifier, possibly with dots/brackets)
+                expr_chars = []
+                brace_depth = 1
+                while self.position < self.length and brace_depth > 0:
+                    c = self.peek()
+                    if c == '{':
+                        brace_depth += 1
+                        expr_chars.append(c)
+                    elif c == '}':
+                        brace_depth -= 1
+                        if brace_depth > 0:
+                            expr_chars.append(c)
+                    else:
+                        expr_chars.append(c)
+                    self.advance()
+                
+                expr_str = ''.join(expr_chars).strip()
+                if expr_str:
+                    parts.append((True, expr_str))
             else:
                 result.append(char)
                 self.advance()
         
-        return ''.join(result)
+        # Finalize: return interpolated or regular string
+        if has_interpolation:
+            # Add any remaining literal text
+            if result:
+                parts.append((False, ''.join(result)))
+            return (True, parts)
+        else:
+            return (False, ''.join(result))
     
     def scan_number(self) -> tuple:
         """
@@ -254,8 +307,12 @@ class Lexer:
         
         # Handle string literals
         if char == '"':
-            string_value = self.scan_string()
-            return Token('STRING', string_value, line=line, column=column)
+            has_interp, string_value = self.scan_string()
+            if has_interp:
+                # Interpolated string: string_value is a list of (is_expr, value) tuples
+                return Token('INTERP_STRING', string_value, line=line, column=column)
+            else:
+                return Token('STRING', string_value, line=line, column=column)
         
         # Handle numbers
         if char.isdigit():
@@ -294,6 +351,7 @@ class Lexer:
         if char == '-': return Token('MINUS', '-', line=line, column=column)
         if char == '*': return Token('STAR', '*', line=line, column=column)
         if char == '/': return Token('SLASH', '/', line=line, column=column)
+        if char == '&': return Token('AMPERSAND', '&', line=line, column=column)
         if char == '=': return Token('ASSIGN', '=', line=line, column=column)
         if char == '<': return Token('LT', '<', line=line, column=column)
         if char == '>': return Token('GT', '>', line=line, column=column)
@@ -304,14 +362,11 @@ class Lexer:
         if char == '}': return Token('RBRACE', '}', line=line, column=column)
         if char == '[': return Token('LBRACKET', '[', line=line, column=column)
         if char == ']': return Token('RBRACKET', ']', line=line, column=column)
-        if char == ';':
-            # Treat the rest of the line as a comment after the semicolon
-            while self.position < self.length and self.peek() != '\n':
-                self.advance()
-            return Token('SEMICOLON', ';', line=line, column=column)
+        if char == ';': return Token('SEMICOLON', ';', line=line, column=column)
         if char == ',': return Token('COMMA', ',', line=line, column=column)
         if char == '.': return Token('DOT', '.', line=line, column=column)
         if char == ':': return Token('COLON', ':', line=line, column=column)
+        if char == '?': return Token('QUESTION', '?', line=line, column=column)
         
         # Unknown character
         raise SyntaxError(f"Unexpected character '{char}' at line {line}, column {column}")

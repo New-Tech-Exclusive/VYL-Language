@@ -15,5 +15,5 @@ Function fib_iter(n: int) -> int {
 }
 
 Function Main() {
-    Print(fib_iter(100000000));
+    Print(fib_iter(40));
 }

@@ -1,0 +1,120 @@
+// Test defer statement functionality
+
+Function testBasicDefer() -> int {
+    Print("testBasicDefer: start\n");
+    
+    defer {
+        Print("  [deferred: cleanup]\n");
+    }
+    
+    Print("testBasicDefer: middle\n");
+    Print("testBasicDefer: end\n");
+    return 1;
+}
+
+Function testMultiDefer() -> int {
+    Print("testMultiDefer: start\n");
+    
+    defer {
+        Print("  [deferred 1 - should be LAST]\n");
+    }
+    
+    Print("testMultiDefer: doing work A\n");
+    
+    defer {
+        Print("  [deferred 2 - should be SECOND]\n");
+    }
+    
+    Print("testMultiDefer: doing work B\n");
+    
+    defer {
+        Print("  [deferred 3 - should be FIRST]\n");
+    }
+    
+    Print("testMultiDefer: end\n");
+    return 2;
+}
+
+Function testDeferWithReturn(x: int) -> int {
+    Print("testDeferWithReturn: start with x=");
+    Print(x);
+    Print("\n");
+    
+    defer {
+        Print("  [deferred: cleanup with x]\n");
+    }
+    
+    if (x > 5) {
+        Print("testDeferWithReturn: early return path\n");
+        return 100;
+    }
+    
+    Print("testDeferWithReturn: normal return path\n");
+    return 200;
+}
+
+Function testDeferFree() -> int {
+    Print("testDeferFree: allocating memory\n");
+    
+    var int ptr = Alloc(1024);
+    
+    defer {
+        Print("  [deferred: freeing memory]\n");
+        Free(ptr);
+    }
+    
+    Print("testDeferFree: using memory at ");
+    Print(ptr);
+    Print("\n");
+    
+    // Simulate work with memory
+    Print("testDeferFree: done with work\n");
+    return 1;
+}
+
+Function Main() -> int {
+    Print("==========================================\n");
+    Print("Defer Statement Tests\n");
+    Print("==========================================\n\n");
+    
+    Print("Test 1: Basic defer\n");
+    Print("--------------------\n");
+    var int r1 = testBasicDefer();
+    Print("Returned: ");
+    Print(r1);
+    Print("\n\n");
+    
+    Print("Test 2: Multiple defers (LIFO order)\n");
+    Print("------------------------------------\n");
+    var int r2 = testMultiDefer();
+    Print("Returned: ");
+    Print(r2);
+    Print("\n\n");
+    
+    Print("Test 3a: Defer with early return\n");
+    Print("---------------------------------\n");
+    var int r3a = testDeferWithReturn(10);
+    Print("Returned: ");
+    Print(r3a);
+    Print("\n\n");
+    
+    Print("Test 3b: Defer with normal return\n");
+    Print("---------------------------------\n");
+    var int r3b = testDeferWithReturn(3);
+    Print("Returned: ");
+    Print(r3b);
+    Print("\n\n");
+    
+    Print("Test 4: Defer with Free (resource cleanup)\n");
+    Print("------------------------------------------\n");
+    var int r4 = testDeferFree();
+    Print("Returned: ");
+    Print(r4);
+    Print("\n\n");
+    
+    Print("==========================================\n");
+    Print("All tests complete!\n");
+    Print("==========================================\n");
+    
+    return 0;
+}

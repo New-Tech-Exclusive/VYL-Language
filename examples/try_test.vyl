@@ -1,0 +1,33 @@
+// Test ? error propagation operator
+
+// Simulated function that returns -1 on error
+MayFail(succeed: int) -> int {
+    if (succeed == 0) {
+        return -1;  // Error
+    }
+    return 42;  // Success
+}
+
+// Function using ? to propagate errors
+UsesTry(succeed: int) -> int {
+    var int result = MayFail(succeed)?;  // Returns early if error
+    Print("Got result: {result}\n");  // Only prints on success
+    return result + 10;
+}
+
+Main() {
+    // Test success case
+    Print("Testing success case:\n");
+    var int r1 = UsesTry(1);
+    Print("Success result: {r1}\n");
+    
+    Print("\nTesting failure case:\n");
+    // Test failure case - UsesTry returns -1 immediately, doesn't print "Got result"
+    var int r2 = UsesTry(0);
+    Print("Failure returned: {r2}\n");  // Should print -1
+    
+    // Show that early return works by checking the value
+    if (r2 < 0) {
+        Print("Error was propagated correctly!\n");
+    }
+}

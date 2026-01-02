@@ -1,0 +1,94 @@
+// VYL Standard Library - File and Directory I/O
+// stdlib.io
+
+Function fileExists(path: string) -> int {
+    var int fd = Open(path, "r");
+    if (fd == 0) {
+        return 0;
+    }
+    Close(fd);
+    return 1;
+}
+
+Function readTextFile(path: string) -> string {
+    var int fd = Open(path, "r");
+    if (fd == 0) {
+        return "";
+    }
+    var string content = Read(fd);
+    Close(fd);
+    return content;
+}
+
+Function writeTextFile(path: string, content: string) -> int {
+    var int fd = Open(path, "w");
+    if (fd == 0) {
+        return 0;
+    }
+    Write(fd, content);
+    Close(fd);
+    return 1;
+}
+
+Function appendTextFile(path: string, content: string) -> int {
+    var int fd = Open(path, "a");
+    if (fd == 0) {
+        return 0;
+    }
+    Write(fd, content);
+    Close(fd);
+    return 1;
+}
+
+Function copyFileTo(src: string, dst: string) -> int {
+    var string content = readTextFile(src);
+    if (StrLen(content) == 0) {
+        return 0;
+    }
+    return writeTextFile(dst, content);
+}
+
+Function removeFile(path: string) -> int {
+    return Remove(path);
+}
+
+Function createDir(path: string) -> int {
+    return MkdirP(path);
+}
+
+Function countFilesInDir(path: string) -> int {
+    var int dir = OpenDir(path);
+    if (dir == 0) {
+        return 0;
+    }
+    
+    var int count = 0;
+    var string entry = ReadDir(dir);
+    while (StrLen(entry) > 0) {
+        count = count + 1;
+        entry = ReadDir(dir);
+    }
+    
+    CloseDir(dir);
+    return count;
+}
+
+Function listDir(path: string) -> int {
+    var int dir = OpenDir(path);
+    if (dir == 0) {
+        return 0;
+    }
+    
+    var int count = 0;
+    var string entry = ReadDir(dir);
+    while (StrLen(entry) > 0) {
+        Print("  ");
+        Print(entry);
+        Print("\n");
+        count = count + 1;
+        entry = ReadDir(dir);
+    }
+    
+    CloseDir(dir);
+    return count;
+}

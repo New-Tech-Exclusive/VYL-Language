@@ -1,0 +1,73 @@
+// VYL Standard Library - String Utilities
+// stdlib.strings
+
+Function startsWith(str: string, prefix: string) -> int {
+    var int strLen = StrLen(str);
+    var int prefixLen = StrLen(prefix);
+    
+    if (prefixLen > strLen) {
+        return 0;
+    }
+    
+    var string sub = Substring(str, 0, prefixLen);
+    if (StrFind(sub, prefix) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+Function endsWith(str: string, suffix: string) -> int {
+    var int strLen = StrLen(str);
+    var int suffixLen = StrLen(suffix);
+    
+    if (suffixLen > strLen) {
+        return 0;
+    }
+    
+    var int start = strLen - suffixLen;
+    var string sub = Substring(str, start, suffixLen);
+    if (StrFind(sub, suffix) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+Function contains(str: string, substr: string) -> int {
+    var int pos = StrFind(str, substr);
+    if (pos >= 0) {
+        return 1;
+    }
+    return 0;
+}
+
+Function repeat(str: string, count: int) -> string {
+    var string result = "";
+    var int i = 0;
+    while (i < count) {
+        result = StrConcat(result, str);
+        i = i + 1;
+    }
+    return result;
+}
+
+Function padLeft(str: string, width: int, padChar: string) -> string {
+    var int len = StrLen(str);
+    if (len >= width) {
+        return str;
+    }
+    
+    var int padCount = width - len;
+    var string padding = repeat(padChar, padCount);
+    return StrConcat(padding, str);
+}
+
+Function padRight(str: string, width: int, padChar: string) -> string {
+    var int len = StrLen(str);
+    if (len >= width) {
+        return str;
+    }
+    
+    var int padCount = width - len;
+    var string padding = repeat(padChar, padCount);
+    return StrConcat(str, padding);
+}

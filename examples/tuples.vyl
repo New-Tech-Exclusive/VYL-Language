@@ -1,0 +1,45 @@
+// Test multiple return values and tuple unpacking
+
+// Function returning a tuple
+Function divmod(a: int, b: int) -> (int, int) {
+    var quotient = a / b;
+    var remainder = a - (quotient * b);
+    return (quotient, remainder);
+}
+
+// Another function returning a tuple
+Function minmax(a: int, b: int) -> (int, int) {
+    if (a < b) {
+        return (a, b);
+    } else {
+        return (b, a);
+    }
+}
+
+Function Main() -> int {
+    // Test tuple unpacking from divmod
+    var q, r = divmod(17, 5);
+    Print("17 / 5 = ");
+    Print(q);
+    Print(", remainder = ");
+    Print(r);
+    Print("\n");
+
+    // Test minmax
+    var min, max = minmax(42, 13);
+    Print("min = ");
+    Print(min);
+    Print(", max = ");
+    Print(max);
+    Print("\n");
+
+    // Test direct tuple literal
+    var x, y = (100, 200);
+    Print("x = ");
+    Print(x);
+    Print(", y = ");
+    Print(y);
+    Print("\n");
+
+    return 0;
+}

@@ -1,0 +1,23 @@
+// Test string interpolation
+
+Main() {
+    var string name = "World";
+    var int x = 42;
+    
+    // Simple variable interpolation
+    Print("Hello {name}!\n");
+    
+    // Integer interpolation
+    Print("The answer is {x}\n");
+    
+    // Multiple interpolations
+    Print("Hello {name}, the answer is {x}\n");
+    
+    // Expression in interpolation
+    Print("Double: {x + x}\n");
+    
+    // Mixed
+    var int a = 10;
+    var int b = 20;
+    Print("a={a}, b={b}, sum={a + b}\n");
+}

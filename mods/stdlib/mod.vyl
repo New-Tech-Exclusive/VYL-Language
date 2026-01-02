@@ -1,0 +1,12 @@
+// VYL Standard Library - Combined Module
+// Version 1.0.0
+// 
+// This module includes all stdlib submodules:
+// - Math functions (abs, min, max, pow, etc.)
+// - String utilities (startsWith, endsWith, contains, repeat, etc.)
+// - IO helpers (fileExists, readTextFile, writeTextFile, etc.)
+
+// Include all submodules
+include "math.vyl"
+include "strings.vyl"
+include "io.vyl"

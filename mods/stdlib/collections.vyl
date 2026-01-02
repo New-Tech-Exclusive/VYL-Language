@@ -1,0 +1,188 @@
+// VYL Standard Library - Collections
+// Generic List and Map implementations
+
+// List<T> - Dynamic array with automatic growth
+Struct List<T> {
+    var *T data;
+    var int capacity;
+    var int length;
+    
+    // Create a new list
+    Function new() -> *List<T> {
+        var *List<T> list = Alloc(24);  // 3 * 8 bytes
+        list.data = Alloc(8 * 8);  // Start with capacity of 8
+        list.capacity = 8;
+        list.length = 0;
+        return list;
+    }
+    
+    // Append an element to the list
+    Function append(self: *List<T>, value: T) -> int {
+        if (self.length == self.capacity) {
+            // Grow capacity by 2x
+            var int newCapacity = self.capacity * 2;
+            var *T newData = Alloc(newCapacity * 8);
+            
+            // Copy old data
+            var int i = 0;
+            while (i < self.length) {
+                // Manual pointer arithmetic for copy
+                var *T oldPtr = self.data + (i * 8);
+                var *T newPtr = newData + (i * 8);
+                *newPtr = *oldPtr;
+                i = i + 1;
+            }
+            
+            self.data = newData;
+            self.capacity = newCapacity;
+        }
+        
+        // Add new element
+        var *T ptr = self.data + (self.length * 8);
+        *ptr = value;
+        self.length = self.length + 1;
+        return 1;
+    }
+    
+    // Get element at index
+    Function get(self: *List<T>, index: int) -> T {
+        if (index < 0) {
+            Exit(1);
+        }
+        if (index >= self.length) {
+            Exit(1);
+        }
+        var *T ptr = self.data + (index * 8);
+        return *ptr;
+    }
+    
+    // Set element at index
+    Function set(self: *List<T>, index: int, value: T) -> int {
+        if (index < 0) {
+            return 0;
+        }
+        if (index >= self.length) {
+            return 0;
+        }
+        var *T ptr = self.data + (index * 8);
+        *ptr = value;
+        return 1;
+    }
+    
+    // Get the length
+    Function size(self: *List<T>) -> int {
+        return self.length;
+    }
+    
+    // Clear the list
+    Function clear(self: *List<T>) -> int {
+        self.length = 0;
+        return 1;
+    }
+}
+
+
+// Map<K, V> - Hash map using simple chaining
+// For now, K must be int or string (hashable types)
+Struct MapEntry<K, V> {
+    var K key;
+    var V value;
+    var *MapEntry<K, V> next;
+}
+
+Struct Map<K, V> {
+    var **MapEntry<K, V> buckets;
+    var int capacity;
+    var int size;
+    
+    // Create a new map
+    Function new() -> *Map<K, V> {
+        var *Map<K, V> map = Alloc(24);
+        map.capacity = 16;
+        map.size = 0;
+        map.buckets = Alloc(16 * 8);  // Array of pointers
+        
+        // Initialize buckets to NULL
+        var int i = 0;
+        while (i < 16) {
+            var **MapEntry<K, V> bucket = map.buckets + (i * 8);
+            *bucket = 0;  // NULL
+            i = i + 1;
+        }
+        
+        return map;
+    }
+    
+    // Simple hash function for integers
+    Function hashInt(key: int, capacity: int) -> int {
+        var int hash = key;
+        if (hash < 0) {
+            hash = 0 - hash;
+        }
+        return hash % capacity;
+    }
+    
+    // Simple hash function for strings (DJB2)
+    Function hashString(key: string, capacity: int) -> int {
+        var int hash = 5381;
+        var int i = 0;
+        var int len = StrLen(key);
+        
+        while (i < len) {
+            var string ch = Substring(key, i, 1);
+            // Simplified: just add ASCII value
+            hash = ((hash * 33) + i) % 1000000;
+            i = i + 1;
+        }
+        
+        if (hash < 0) {
+            hash = 0 - hash;
+        }
+        return hash % capacity;
+    }
+    
+    // Put a key-value pair
+    Function put(self: *Map<K, V>, key: K, value: V) -> int {
+        // NOTE: Generic hash dispatch would need compiler support
+        // For now, this is a template - concrete types would need specific implementations
+        var int bucketIdx = 0;  // Would call appropriate hash function
+        
+        var **MapEntry<K, V> bucketPtr = self.buckets + (bucketIdx * 8);
+        var *MapEntry<K, V> entry = *bucketPtr;
+        
+        // Search for existing key
+        while (entry != 0) {
+            // NOTE: Key comparison would need generic support
+            // if (entry.key == key) { ... }
+            entry = entry.next;
+        }
+        
+        // Create new entry
+        var *MapEntry<K, V> newEntry = Alloc(24);
+        newEntry.key = key;
+        newEntry.value = value;
+        newEntry.next = *bucketPtr;
+        *bucketPtr = newEntry;
+        
+        self.size = self.size + 1;
+        return 1;
+    }
+    
+    // Get a value by key (returns 0/NULL if not found)
+    Function get(self: *Map<K, V>, key: K) -> V {
+        var int bucketIdx = 0;  // Would call appropriate hash function
+        
+        var **MapEntry<K, V> bucketPtr = self.buckets + (bucketIdx * 8);
+        var *MapEntry<K, V> entry = *bucketPtr;
+        
+        while (entry != 0) {
+            // NOTE: Would check entry.key == key
+            return entry.value;
+        }
+        
+        // Not found - return zero value
+        // NOTE: This requires generic default values
+        var V defaultValue;
+        return defaultValue;
+    }
+}

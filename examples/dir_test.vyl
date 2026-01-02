@@ -1,0 +1,26 @@
+// Simple test of directory listing
+
+Function Main() -> int {
+    Print("Files in current directory:\n");
+    
+    var int dir = OpenDir(".");
+    if (dir == 0) {
+        Print("Cannot open directory\n");
+        return 1;
+    }
+    
+    var int count = 0;
+    var string entry = ReadDir(dir);
+    while (StrLen(entry) > 0) {
+        Print("  ");
+        Print(entry);
+        Print("\n");
+        count = count + 1;
+        entry = ReadDir(dir);
+    }
+    
+    CloseDir(dir);
+    Print("Total: " + count + " files\n");
+    
+    return 0;
+}

@@ -1,3 +1,20 @@
+# ATTENTION
+
+v0.2.5 is coming out laterr this month most likely. It's a full rewrite of VYL, parser, codegen, everything. This changes everything about the language, old .vyl files WILL NOT be able to be compiled. Old compiled code will still work, as thats just ASM. Infact, nothing will be able to be compiled, as we now will be transpiling to C, then compiling that code to machine code. Why? well to leverage the massive C ecosystem. Moving away from a compiler to a transpiler Runtime is what were doing. The Language is moving to a Hot-swap system too, save it to a file and it will run the new code, no restart required. This, of course, will come with it's challenges, external functions will be easier, to code and debug. Any and almost all syntax is different. With the new hot-swap runtime, we figured it would be better to move the language towards a functional programming style of syntax, to make apps more stable.
+
+## So, what will the features look like for **v0.2.5?**
+
+- Actual extern support
+- By line terminations, no more semi-colons
+- Even more readable code
+- Hot-swapping code (See the Hot-swap section)
+- An actually useable language
+- **NO MORE MANUAL MEMORY MANAGEMENT** Now handled by custom Arena module.
+
+# Hot-swap
+
+So, with the hot-swap idea being written, we aren't moving away from native code. But we are changing things. We are moving away from our extremely fast ASM output, instead using a C backend. We are NOT building an Interpereter, nor just a transpiler. The hot-swapping works through injecting new compiled code into a new file, then having the runtime move over to the next file, and having it start from where the last memory read left off. So C speed, no VM overhead.
+
 # VYL Compiler
 
 A Python-based compiler for the VYL language that emits x86-64 assembly and produces runnable ELF binaries by default.
